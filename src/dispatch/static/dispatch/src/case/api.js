@@ -13,6 +13,12 @@ export default {
     return API.get(`/${resource}/${caseId}`)
   },
 
+  getParticipants(caseId, minimal = true) {
+    return API.get(`/${resource}/${caseId}/participants`, {
+      params: { minimal },
+    })
+  },
+
   create(payload) {
     return API.post(`/${resource}`, payload)
   },
@@ -43,5 +49,17 @@ export default {
 
   delete(caseId) {
     return API.delete(`/${resource}/${caseId}`)
+  },
+
+  join(caseId, payload) {
+    return API.post(`/${resource}/${caseId}/join`, payload)
+  },
+
+  createAllResources(caseId, payload) {
+    return API.post(`/${resource}/${caseId}/resources`, payload)
+  },
+
+  createCaseChannel(caseId, payload) {
+    return API.post(`/${resource}/${caseId}/resources/conversation`, payload)
   },
 }

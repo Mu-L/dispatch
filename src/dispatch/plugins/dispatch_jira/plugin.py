@@ -4,18 +4,29 @@
 :copyright: (c) 2019 by Netflix Inc., see AUTHORS for more
 :license: Apache, see LICENSE for more details.
 """
-from enum import Enum
-from typing import Any
 
-from pydantic import Field, SecretStr, HttpUrl
+from typing import Any
+import json
+import logging
+
+import requests
+from requests.auth import HTTPBasicAuth
+
+from sqlalchemy.orm import Session
+
+from pydantic import Field, SecretStr, AnyHttpUrl
 
 from jinja2 import Template
-from jira import JIRA, User
+from jira import JIRA
 
 from dispatch.config import BaseConfigurationModel
 from dispatch.decorators import apply, counter, timer
+from dispatch.enums import DispatchEnum
 from dispatch.plugins import dispatch_jira as jira_plugin
+from dispatch.case import service as case_service
+from dispatch.incident import service as incident_service
 from dispatch.plugins.bases import TicketPlugin
+from dispatch.project.models import Project
 
 from .templates import (
     CASE_ISSUE_SUMMARY_TEMPLATE,
@@ -23,8 +34,12 @@ from .templates import (
     INCIDENT_ISSUE_SUMMARY_TEMPLATE,
 )
 
+from dispatch.config import DISPATCH_UI_URL
 
-class HostingType(str, Enum):
+log = logging.getLogger(__name__)
+
+
+class HostingType(DispatchEnum):
     """Type of Jira deployment."""
 
     cloud = "cloud"
@@ -34,14 +49,8 @@ class HostingType(str, Enum):
 class JiraConfiguration(BaseConfigurationModel):
     """Jira configuration description."""
 
-    api_url: HttpUrl = Field(
-        title="API URL", description="This URL is used for communication with API."
-    )
-    browser_url: HttpUrl = Field(
-        title="Browser URL", description="This URL is used to construct browser weblinks."
-    )
     default_project_id: str = Field(
-        title="Default Project ID", description="Defines the default Jira Project to use."
+        title="Default Project Id or Key", description="Defines the default Jira Project to use."
     )
     default_issue_type_name: str = Field(
         title="Default Issue Type Name",
@@ -56,6 +65,12 @@ class JiraConfiguration(BaseConfigurationModel):
     password: SecretStr = Field(
         title="Password", description="Password to use to authenticate to Jira API."
     )
+    api_url: AnyHttpUrl = Field(
+        title="API URL", description="This URL is used for communication with API."
+    )
+    browser_url: AnyHttpUrl = Field(
+        title="Browser URL", description="This URL is used to construct browser weblinks."
+    )
 
 
 def get_email_username(email: str) -> str:
@@ -65,9 +80,31 @@ def get_email_username(email: str) -> str:
     return email
 
 
-def get_user_field(client: JIRA, hosting_type: str, jira_username: str, user_email: str) -> dict:
+def get_cloud_user_account_id_by_email(configuration: JiraConfiguration, user_email: str) -> dict:
+    """Gets the cloud Jira user account id by email address."""
+    endpoint = "groupuserpicker"
+    url = f"{configuration.api_url}/rest/api/2/{endpoint}?query={user_email}&maxResults=1"
+    auth = (configuration.username, configuration.password.get_secret_value())
+
+    headers = {"Accept": "application/json"}
+    response = requests.request("GET", url, headers=headers, auth=HTTPBasicAuth(*auth))
+
+    users = json.loads(response.text)
+    if users["users"]["users"]:
+        return users["users"]["users"][0]["accountId"]
+
+    # we get and return the account id of the default Jira account
+    url = (
+        f"{configuration.api_url}/rest/api/2/{endpoint}?query={configuration.username}&maxResults=1"
+    )
+    response = requests.request("GET", url, headers=headers, auth=HTTPBasicAuth(*auth))
+    users = json.loads(response.text)
+    return users["users"]["users"][0]["accountId"]
+
+
+def get_user_field(client: JIRA, configuration: JiraConfiguration, user_email: str) -> dict:
     """Returns correct Jira user field based on Jira hosting type."""
-    if hosting_type == "server":
+    if configuration.hosting_type == HostingType.server:
         username = get_email_username(user_email)
         users = client.search_users(user=username)
         for user in users:
@@ -76,20 +113,10 @@ def get_user_field(client: JIRA, hosting_type: str, jira_username: str, user_ema
 
         # we default to the Jira user we use for managing issues
         # if we can't find the user in Jira
-        return {"name": jira_username}
-    if hosting_type == "cloud":
-        username = get_email_username(user_email)
-        user = next(
-            client._fetch_pages(
-                User,
-                None,
-                "user/search",
-                startAt=0,
-                maxResults=1,
-                params={"query": username},
-            )
-        )
-        return {"id": user.accountId}
+        return {"name": configuration.username}
+    if configuration.hosting_type == HostingType.cloud:
+        user_account_id = get_cloud_user_account_id_by_email(configuration, user_email)
+        return {"id": user_account_id}
 
 
 def process_plugin_metadata(plugin_metadata: dict):
@@ -106,14 +133,22 @@ def process_plugin_metadata(plugin_metadata: dict):
     return project_id, issue_type_name
 
 
+def create_dict_from_plugin_metadata(plugin_metadata: dict):
+    """Creates a dictionary from plugin metadata, excluding project_id and issue_type_name."""
+    metadata_dict = {}
+    if plugin_metadata:
+        for key_value in plugin_metadata["metadata"]:
+            if key_value["key"] != "project_id" and key_value["key"] != "issue_type_name":
+                metadata_dict[key_value["key"]] = key_value["value"]
+
+    return metadata_dict
+
+
 def create_client(configuration: JiraConfiguration) -> JIRA:
     """Creates a Jira client."""
     return JIRA(
         configuration.api_url,
-        basic_auth=(
-            configuration.username,
-            configuration.password.get_secret_value(),
-        ),
+        basic_auth=(configuration.username, configuration.password.get_secret_value()),
     )
 
 
@@ -130,6 +165,7 @@ def create_incident_issue_fields(
     document_weblink: str,
     storage_weblink: str,
     conference_weblink: str,
+    dispatch_weblink: str,
     cost: float,
 ):
     """Creates Jira issue fields."""
@@ -167,6 +203,7 @@ def create_incident_issue_fields(
             conference_weblink=conference_weblink,
             conversation_weblink=conversation_weblink,
             storage_weblink=storage_weblink,
+            dispatch_weblink=dispatch_weblink,
         )
     issue_fields.update({"description": description})
 
@@ -185,6 +222,7 @@ def create_case_issue_fields(
     assignee_username: str,
     document_weblink: str,
     storage_weblink: str,
+    dispatch_weblink: str,
 ):
     """Creates Jira issue fields."""
     issue_fields = {}
@@ -201,6 +239,7 @@ def create_case_issue_fields(
         document_weblink=document_weblink,
         resolution=resolution,
         storage_weblink=storage_weblink,
+        dispatch_weblink=dispatch_weblink,
     )
     issue_fields.update({"description": description})
 
@@ -232,6 +271,16 @@ def update(
     return data
 
 
+def create_fallback_ticket(id: int, project: Project, db_session: Session):
+    resource_id = f"dispatch-{project.organization.slug}-{project.slug}-{id}"
+
+    return {
+        "resource_id": resource_id,
+        "weblink": f"{DISPATCH_UI_URL}/{project.organization.name}/incidents/{resource_id}?project={project.name}",
+        "resource_type": "jira-error-ticket",
+    }
+
+
 @apply(counter, exclude=["__init__"])
 @apply(timer, exclude=["__init__"])
 class JiraTicketPlugin(TicketPlugin):
@@ -252,36 +301,57 @@ class JiraTicketPlugin(TicketPlugin):
         title: str,
         commander_email: str,
         reporter_email: str,
-        incident_type_plugin_metadata: dict = {},
+        incident_type_plugin_metadata: dict = None,
         db_session=None,
     ):
         """Creates an incident Jira issue."""
-        client = create_client(self.configuration)
+        try:
+            client = create_client(self.configuration)
 
-        assignee = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, commander_email
-        )
-        reporter = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, reporter_email
-        )
+            assignee = get_user_field(client, self.configuration, commander_email)
 
-        project_id, issue_type_name = process_plugin_metadata(incident_type_plugin_metadata)
+            reporter = assignee
+            if reporter_email != commander_email:
+                reporter = get_user_field(client, self.configuration, reporter_email)
 
-        if not project_id:
-            project_id = self.configuration.default_project_id
+            project_id, issue_type_name = process_plugin_metadata(incident_type_plugin_metadata)
+            other_fields = create_dict_from_plugin_metadata(incident_type_plugin_metadata)
 
-        if not issue_type_name:
-            issue_type_name = self.configuration.default_issue_type_name
+            if not project_id:
+                project_id = self.configuration.default_project_id
 
-        issue_fields = {
-            "project": {"id": project_id},
-            "issuetype": {"name": issue_type_name},
-            "assignee": assignee,
-            "reporter": reporter,
-            "summary": title,
-        }
+            # NOTE: to support issue creation by project id or key
+            project = {"id": project_id}
+            if not project_id.isdigit():
+                project = {"key": project_id}
 
-        return create(self.configuration, client, issue_fields)
+            if not issue_type_name:
+                issue_type_name = self.configuration.default_issue_type_name
+
+            issuetype = {"name": issue_type_name}
+
+            issue_fields = {
+                "project": project,
+                "issuetype": issuetype,
+                "assignee": assignee,
+                "reporter": reporter,
+                "summary": title,
+                **other_fields,
+            }
+
+            ticket = create(self.configuration, client, issue_fields)
+        except Exception as e:
+            log.exception(
+                f"Failed to create Jira ticket for incident_id: {incident_id}. "
+                f"Creating incident ticket with core plugin instead. Error: {e}"
+            )
+            # fall back to creating a ticket without the plugin
+            incident = incident_service.get(db_session=db_session, incident_id=incident_id)
+            ticket = create_fallback_ticket(
+                id=incident.id, project=incident.project, db_session=db_session
+            )
+
+        return ticket
 
     def update(
         self,
@@ -298,18 +368,18 @@ class JiraTicketPlugin(TicketPlugin):
         document_weblink: str,
         storage_weblink: str,
         conference_weblink: str,
+        dispatch_weblink: str,
         cost: float,
-        incident_type_plugin_metadata: dict = {},
+        incident_type_plugin_metadata: dict = None,
     ):
         """Updates an incident Jira issue."""
         client = create_client(self.configuration)
 
-        assignee = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, commander_email
-        )
-        reporter = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, reporter_email
-        )
+        assignee = get_user_field(client, self.configuration, commander_email)
+
+        reporter = assignee
+        if reporter_email != commander_email:
+            reporter = get_user_field(client, self.configuration, reporter_email)
 
         commander_username = get_email_username(commander_email)
 
@@ -327,10 +397,36 @@ class JiraTicketPlugin(TicketPlugin):
             document_weblink=document_weblink,
             storage_weblink=storage_weblink,
             conference_weblink=conference_weblink,
+            dispatch_weblink=dispatch_weblink,
             cost=cost,
         )
 
         return update(self.configuration, client, issue, issue_fields, status)
+
+    def update_metadata(
+        self,
+        ticket_id: str,
+        metadata: dict,
+    ):
+        """Updates the metadata of a Jira issue."""
+        client = create_client(self.configuration)
+        issue = client.issue(ticket_id)
+
+        # check to make sure project id matches metadata
+        project_id, issue_type_name = process_plugin_metadata(metadata)
+        if project_id and issue.fields.project.key != project_id:
+            log.warning(
+                f"Project key mismatch between Jira issue {issue.fields.project.key} and metadata {project_id} for ticket {ticket_id}"
+            )
+            return
+        other_fields = create_dict_from_plugin_metadata(metadata)
+        issue_fields = {
+            **other_fields,
+        }
+        if issue_type_name:
+            issue_fields["issuetype"] = {"name": issue_type_name}
+
+        issue.update(fields=issue_fields)
 
     def create_case_ticket(
         self,
@@ -338,37 +434,117 @@ class JiraTicketPlugin(TicketPlugin):
         title: str,
         assignee_email: str,
         # reporter_email: str,
-        case_type_plugin_metadata: dict = {},
+        case_type_plugin_metadata: dict = None,
         db_session=None,
     ):
         """Creates a case Jira issue."""
+        try:
+            client = create_client(self.configuration)
+
+            assignee = get_user_field(client, self.configuration, assignee_email)
+            # TODO(mvilanova): enable reporter email and replace assignee email
+            # reporter = get_user_field(client, self.configuration, reporter_email)
+            reporter = assignee
+
+            project_id, issue_type_name = process_plugin_metadata(case_type_plugin_metadata)
+
+            if not project_id:
+                project_id = self.configuration.default_project_id
+
+            project = {"id": project_id}
+            if not project_id.isdigit():
+                project = {"key": project_id}
+
+            if not issue_type_name:
+                issue_type_name = self.configuration.default_issue_type_name
+
+            issuetype = {"name": issue_type_name}
+
+            issue_fields = {
+                "project": project,
+                "issuetype": issuetype,
+                "assignee": assignee,
+                "reporter": reporter,
+                "summary": title,
+            }
+
+            ticket = create(self.configuration, client, issue_fields)
+        except Exception as e:
+            log.exception(
+                (
+                    f"Failed to create Jira ticket for case_id: {case_id}. "
+                    f"Creating case ticket with core plugin instead. Error: {e}"
+                )
+            )
+            # fall back to creating a ticket without the plugin
+            case = case_service.get(db_session=db_session, case_id=case_id)
+            ticket = create_fallback_ticket(id=case.id, project=case.project, db_session=db_session)
+
+        return ticket
+
+    def create_task_ticket(
+        self,
+        task_id: int,
+        title: str,
+        assignee_email: str,
+        reporter_email: str,
+        incident_ticket_key: str = None,
+        task_plugin_metadata: dict = None,
+        db_session=None,
+    ):
+        """Creates a task Jira issue."""
         client = create_client(self.configuration)
 
-        assignee = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, assignee_email
-        )
-        # TODO(mvilanova): enable reporter email and replace assignee email
-        reporter = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, assignee_email
-        )
+        assignee = get_user_field(client, self.configuration, assignee_email)
+        reporter = get_user_field(client, self.configuration, reporter_email)
 
-        project_id, issue_type_name = process_plugin_metadata(case_type_plugin_metadata)
+        project_id, issue_type_name = process_plugin_metadata(task_plugin_metadata)
+        other_fields = create_dict_from_plugin_metadata(task_plugin_metadata)
 
         if not project_id:
             project_id = self.configuration.default_project_id
 
+        project = {"id": project_id}
+        if not project_id.isdigit():
+            project = {"key": project_id}
+
         if not issue_type_name:
             issue_type_name = self.configuration.default_issue_type_name
 
+        issuetype = {"name": issue_type_name}
+
         issue_fields = {
-            "project": {"id": project_id},
-            "issuetype": {"name": issue_type_name},
+            "project": project,
+            "issuetype": issuetype,
             "assignee": assignee,
             "reporter": reporter,
             "summary": title,
+            **other_fields,
         }
 
-        return create(self.configuration, client, issue_fields)
+        issue = client.create_issue(fields=issue_fields)
+
+        if incident_ticket_key:
+            update = {
+                "issuelinks": [
+                    {
+                        "add": {
+                            "type": {
+                                "name": "Relates",
+                                "inward": "is related to",
+                                "outward": "relates to",
+                            },
+                            "outwardIssue": {"key": incident_ticket_key},
+                        }
+                    }
+                ]
+            }
+            issue.update(update=update)
+
+        return {
+            "resource_id": issue.key,
+            "weblink": f"{self.configuration.browser_url}/browse/{issue.key}",
+        }
 
     def update_case_ticket(
         self,
@@ -384,18 +560,16 @@ class JiraTicketPlugin(TicketPlugin):
         # reporter_email: str,
         document_weblink: str,
         storage_weblink: str,
-        case_type_plugin_metadata: dict = {},
+        dispatch_weblink: str,
+        case_type_plugin_metadata: dict = None,
     ):
         """Updates a case Jira issue."""
         client = create_client(self.configuration)
 
-        assignee = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, assignee_email
-        )
+        assignee = get_user_field(client, self.configuration, assignee_email)
         # TODO(mvilanova): enable reporter email and replace assignee email
-        reporter = get_user_field(
-            client, self.configuration.hosting_type, self.configuration.username, assignee_email
-        )
+        # reporter = get_user_field(client, self.configuration, reporter_email)
+        reporter = assignee
 
         assignee_username = get_email_username(assignee_email)
 
@@ -412,6 +586,7 @@ class JiraTicketPlugin(TicketPlugin):
             assignee_username=assignee_username,
             document_weblink=document_weblink,
             storage_weblink=storage_weblink,
+            dispatch_weblink=dispatch_weblink,
         )
 
         return update(self.configuration, client, issue, issue_fields, status)

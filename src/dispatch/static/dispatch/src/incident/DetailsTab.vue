@@ -1,101 +1,89 @@
 <template>
-  <v-container grid-list-md>
-    <v-layout wrap>
-      <v-flex xs12>
-        <ValidationProvider name="Title" rules="required" immediate>
-          <v-text-field
-            v-model="title"
-            slot-scope="{ errors, valid }"
-            :error-messages="errors"
-            :success="valid"
-            label="Title"
-            hint="Title of the incident."
-            clearable
-            required
-          />
-        </ValidationProvider>
-      </v-flex>
-      <v-flex xs12>
-        <ValidationProvider name="Description" rules="required" immediate>
-          <v-textarea
-            v-model="description"
-            slot-scope="{ errors, valid }"
-            :error-messages="errors"
-            :success="valid"
-            label="Description"
-            hint="Description of the incident."
-            clearable
-            required
-          />
-        </ValidationProvider>
-      </v-flex>
-      <v-flex xs12>
+  <v-container>
+    <v-row>
+      <v-col cols="12">
+        <v-text-field
+          v-model="title"
+          label="Title"
+          hint="Title of the incident."
+          clearable
+          required
+          name="Title"
+          :rules="[rules.required]"
+        />
+      </v-col>
+      <v-col cols="12">
+        <v-textarea
+          v-model="description"
+          label="Description"
+          hint="Description of the incident."
+          clearable
+          required
+          name="Description"
+          :rules="[rules.required]"
+        />
+      </v-col>
+      <v-col cols="12">
         <v-textarea
           v-model="resolution"
           label="Resolution"
           hint="Description of the actions taken to resolve the incident."
           clearable
         />
-      </v-flex>
-      <v-flex xs6>
-        <ValidationProvider name="Reporter" rules="required" immediate>
-          <participant-select
-            v-model="reporter"
-            slot-scope="{ errors, valid }"
-            label="Reporter"
-            :error-messages="errors"
-            :success="valid"
-            hint="The participant who reported the incident."
-            clearable
-            required
-            :project="project"
-          />
-        </ValidationProvider>
-      </v-flex>
-      <v-flex xs6>
-        <ValidationProvider name="Incident Commander" rules="required" immediate>
-          <participant-select
-            v-model="commander"
-            slot-scope="{ errors, valid }"
-            label="Incident Commander"
-            :error-messages="errors"
-            :success="valid"
-            hint="The participant acting as incident commander."
-            clearable
-            required
-            :project="project"
-          />
-        </ValidationProvider>
-      </v-flex>
-      <v-flex xs6>
-        <project-select v-model="project" />
-      </v-flex>
-      <v-flex xs6>
+      </v-col>
+      <v-col cols="6">
+        <participant-select
+          v-model="reporter"
+          label="Reporter"
+          hint="The participant who reported the incident."
+          clearable
+          required
+          :project="project"
+          name="Reporter"
+          :rules="[required_and_only_one]"
+        />
+      </v-col>
+      <v-col cols="6">
+        <participant-select
+          v-model="commander"
+          label="Incident Commander"
+          hint="The participant acting as incident commander."
+          clearable
+          required
+          :project="project"
+          name="Incident Commander"
+          :rules="[required_and_only_one]"
+        />
+      </v-col>
+      <v-col cols="6">
+        <project-select v-model="project" :disabled="project_disabled" />
+      </v-col>
+      <v-col cols="6">
         <incident-type-select v-model="incident_type" :project="project" />
-      </v-flex>
-      <v-flex xs6>
-        <incident-severity-select v-model="incident_severity" :project="project" />
-      </v-flex>
-      <v-flex xs6>
-        <incident-priority-select v-model="incident_priority" :project="project" />
-      </v-flex>
-      <v-flex xs6>
+      </v-col>
+      <v-col cols="6">
+        <incident-severity-select v-model="incident_severity" :project="project" :status="status" />
+      </v-col>
+      <v-col cols="6">
+        <incident-priority-select v-model="incident_priority" :project="project" :status="status" />
+      </v-col>
+      <v-col cols="6">
         <v-select
           v-model="status"
           label="Status"
           :items="statuses"
           hint="The status of the incident."
         />
-      </v-flex>
-      <v-flex xs6>
+      </v-col>
+      <v-col cols="6">
         <v-select
           v-model="visibility"
           label="Visibility"
           :items="visibilities"
-          hint="The visibilty of the incident."
+          hint="The visibility of the incident."
         />
-      </v-flex>
-      <v-flex xs12>
+      </v-col>
+      <v-col cols="12">
         <v-row>
           <v-col cols="6">
             <date-time-picker-menu label="Reported At" v-model="reported_at" />
@@ -104,30 +92,33 @@
             <date-time-picker-menu label="Stable At" v-model="stable_at" />
           </v-col>
         </v-row>
-      </v-flex>
-      <v-flex xs12>
+      </v-col>
+      <v-col cols="12">
         <tag-filter-auto-complete
           label="Tags"
           v-model="tags"
           :project="project"
           model="incident"
           :model-id="id"
+          show-copy
         />
-      </v-flex>
-      <v-flex xs12>
+      </v-col>
+      <v-col cols="12">
         <incident-filter-combobox label="Duplicates" v-model="duplicates" :project="project" />
-      </v-flex>
-      <v-flex xs12>
+      </v-col>
+      <v-col cols="12">
         <case-filter-combobox label="Cases" v-model="cases" />
-      </v-flex>
-    </v-layout>
+      </v-col>
+      <v-col cols="12" v-show="false">
+        <v-text-field v-model="project" name="project" />
+      </v-col>
+    </v-row>
   </v-container>
 </template>
 
 <script>
-import { ValidationProvider, extend } from "vee-validate"
+import { required } from "@/util/form"
 import { mapFields } from "vuex-map-fields"
-import { required } from "vee-validate/dist/rules"
 
 import CaseFilterCombobox from "@/case/CaseFilterCombobox.vue"
 import DateTimePickerMenu from "@/components/DateTimePickerMenu.vue"
@@ -135,16 +126,16 @@ import IncidentFilterCombobox from "@/incident/IncidentFilterCombobox.vue"
 import IncidentPrioritySelect from "@/incident/priority/IncidentPrioritySelect.vue"
 import IncidentSeveritySelect from "@/incident/severity/IncidentSeveritySelect.vue"
 import IncidentTypeSelect from "@/incident/type/IncidentTypeSelect.vue"
-import ParticipantSelect from "@/incident/ParticipantSelect.vue"
+import ParticipantSelect from "@/components/ParticipantSelect.vue"
 import ProjectSelect from "@/project/ProjectSelect.vue"
-import TagFilterAutoComplete from "@/tag/TagFilterAutoComplete.vue"
-
-extend("required", {
-  ...required,
-  message: "This field is required",
-})
+import TagFilterAutoComplete from "@/tag/TagPicker.vue"
 
 export default {
+  setup() {
+    return {
+      rules: { required },
+    }
+  },
   name: "IncidentDetailsTab",
 
   components: {
@@ -157,13 +148,21 @@ export default {
     ParticipantSelect,
     ProjectSelect,
     TagFilterAutoComplete,
-    ValidationProvider,
   },
 
   data() {
     return {
       statuses: ["Active", "Stable", "Closed"],
       visibilities: ["Open", "Restricted"],
+      required_and_only_one: (value) => {
+        if (!value || value.length == 0) {
+          return "This field is required"
+        }
+        if (value && value.length > 1) {
+          return "Only one is allowed"
+        }
+        return true
+      },
     }
   },
 
@@ -190,6 +189,9 @@ export default {
       "selected.title",
       "selected.visibility",
     ]),
+    project_disabled(item) {
+      return item.id != null
+    },
   },
 }
 </script>

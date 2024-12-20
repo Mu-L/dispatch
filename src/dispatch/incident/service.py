@@ -4,14 +4,18 @@
     :copyright: (c) 2019 by Netflix Inc., see AUTHORS for more
     :license: Apache, see LICENSE for more details.
 """
+
 import logging
 
 from datetime import datetime, timedelta
 from typing import List, Optional
 from pydantic.error_wrappers import ErrorWrapper, ValidationError
 
+from sqlalchemy.orm import Session
+
+from dispatch.decorators import timer
 from dispatch.case import service as case_service
-from dispatch.database.core import SessionLocal
+from dispatch.enums import Visibility
 from dispatch.event import service as event_service
 from dispatch.exceptions import NotFoundError
 from dispatch.incident.priority import service as incident_priority_service
@@ -25,6 +29,7 @@ from dispatch.plugin import service as plugin_service
 from dispatch.project import service as project_service
 from dispatch.tag import service as tag_service
 from dispatch.term import service as term_service
+from dispatch.ticket import flows as ticket_flows
 
 from .enums import IncidentStatus
 from .models import Incident, IncidentCreate, IncidentRead, IncidentUpdate
@@ -33,9 +38,7 @@ from .models import Incident, IncidentCreate, IncidentRead, IncidentUpdate
 log = logging.getLogger(__name__)
 
 
-def resolve_and_associate_role(
-    db_session: SessionLocal, incident: Incident, role: ParticipantRoleType
-):
+def resolve_and_associate_role(db_session: Session, incident: Incident, role: ParticipantRoleType):
     """For a given role type resolve which individual email should be assigned that role."""
     email_address = None
     service_id = None
@@ -62,12 +65,13 @@ def resolve_and_associate_role(
     return email_address, service_id
 
 
-def get(*, db_session, incident_id: int) -> Optional[Incident]:
+@timer
+def get(*, db_session: Session, incident_id: int) -> Optional[Incident]:
     """Returns an incident based on the given id."""
     return db_session.query(Incident).filter(Incident.id == incident_id).first()
 
 
-def get_by_name(*, db_session, project_id: int, name: str) -> Optional[Incident]:
+def get_by_name(*, db_session: Session, project_id: int, name: str) -> Optional[Incident]:
     """Returns an incident based on the given name."""
     return (
         db_session.query(Incident)
@@ -77,7 +81,21 @@ def get_by_name(*, db_session, project_id: int, name: str) -> Optional[Incident]
     )
 
 
-def get_by_name_or_raise(*, db_session, project_id: int, incident_in: IncidentRead) -> Incident:
+def get_all_open_by_incident_type(
+    *, db_session: Session, incident_type_id: int
+) -> List[Optional[Incident]]:
+    """Returns all non-closed incidents based on the given incident type."""
+    return (
+        db_session.query(Incident)
+        .filter(Incident.status != IncidentStatus.closed)
+        .filter(Incident.incident_type_id == incident_type_id)
+        .all()
+    )
+
+
+def get_by_name_or_raise(
+    *, db_session: Session, project_id: int, incident_in: IncidentRead
+) -> Incident:
     """Returns an incident based on a given name or raises ValidationError"""
     incident = get_by_name(db_session=db_session, project_id=project_id, name=incident_in.name)
 
@@ -97,12 +115,14 @@ def get_by_name_or_raise(*, db_session, project_id: int, incident_in: IncidentRe
     return incident
 
 
-def get_all(*, db_session, project_id: int) -> List[Optional[Incident]]:
+def get_all(*, db_session: Session, project_id: int) -> List[Optional[Incident]]:
     """Returns all incidents."""
     return db_session.query(Incident).filter(Incident.project_id == project_id)
 
 
-def get_all_by_status(*, db_session, status: str, project_id: int) -> List[Optional[Incident]]:
+def get_all_by_status(
+    *, db_session: Session, status: str, project_id: int
+) -> List[Optional[Incident]]:
     """Returns all incidents based on the given status."""
     return (
         db_session.query(Incident)
@@ -112,8 +132,16 @@ def get_all_by_status(*, db_session, status: str, project_id: int) -> List[Optio
     )
 
 
+def get_all_last_x_hours(*, db_session: Session, hours: int) -> List[Optional[Incident]]:
+    """Returns all incidents in the last x hours."""
+    now = datetime.utcnow()
+    return (
+        db_session.query(Incident).filter(Incident.created_at >= now - timedelta(hours=hours)).all()
+    )
+
+
 def get_all_last_x_hours_by_status(
-    *, db_session, status: str, hours: int, project_id: int
+    *, db_session: Session, status: str, hours: int, project_id: int
 ) -> List[Optional[Incident]]:
     """Returns all incidents of a given status in the last x hours."""
     now = datetime.utcnow()
@@ -146,7 +174,7 @@ def get_all_last_x_hours_by_status(
         )
 
 
-def create(*, db_session, incident_in: IncidentCreate) -> Incident:
+def create(*, db_session: Session, incident_in: IncidentCreate) -> Incident:
     """Creates a new incident."""
     project = project_service.get_by_name_or_default(
         db_session=db_session, project_in=incident_in.project
@@ -162,9 +190,10 @@ def create(*, db_session, incident_in: IncidentCreate) -> Incident:
         incident_priority_in=incident_in.incident_priority,
     )
 
-    incident_severity = incident_severity_service.get_default(
+    incident_severity = incident_severity_service.get_by_name_or_default(
         db_session=db_session,
         project_id=project.id,
+        incident_severity_in=incident_in.incident_severity,
     )
 
     visibility = incident_type.visibility
@@ -191,11 +220,25 @@ def create(*, db_session, incident_in: IncidentCreate) -> Incident:
     db_session.add(incident)
     db_session.commit()
 
+    reporter_name = incident_in.reporter.individual.name if incident_in.reporter else ""
+
     event_service.log_incident_event(
         db_session=db_session,
         source="Dispatch Core App",
         description="Incident created",
+        details={
+            "title": incident.title,
+            "description": incident.description,
+            "type": incident.incident_type.name,
+            "severity": incident.incident_severity.name,
+            "priority": incident.incident_priority.name,
+            "status": incident.status,
+            "visibility": incident.visibility,
+        },
+        individual_id=incident_in.reporter.individual.id,
         incident_id=incident.id,
+        owner=reporter_name,
+        pinned=True,
     )
 
     # add reporter
@@ -204,12 +247,14 @@ def create(*, db_session, incident_in: IncidentCreate) -> Incident:
         reporter_email,
         incident,
         db_session,
-        role=ParticipantRoleType.reporter,
+        roles=[ParticipantRoleType.reporter],
     )
 
     # add commander
     commander_email = commander_service_id = None
-    if incident_in.commander:
+    if incident_in.commander_email:
+        commander_email = incident_in.commander_email
+    elif incident_in.commander:
         commander_email = incident_in.commander.individual.email
     else:
         commander_email, commander_service_id = resolve_and_associate_role(
@@ -226,7 +271,7 @@ def create(*, db_session, incident_in: IncidentCreate) -> Incident:
         incident,
         db_session,
         service_id=commander_service_id,
-        role=ParticipantRoleType.incident_commander,
+        roles=[ParticipantRoleType.incident_commander],
     )
 
     # add liaison
@@ -242,7 +287,7 @@ def create(*, db_session, incident_in: IncidentCreate) -> Incident:
             incident,
             db_session,
             service_id=liaison_service_id,
-            role=ParticipantRoleType.liaison,
+            roles=[ParticipantRoleType.liaison],
         )
 
     # add scribe
@@ -258,13 +303,37 @@ def create(*, db_session, incident_in: IncidentCreate) -> Incident:
             incident,
             db_session,
             service_id=scribe_service_id,
-            role=ParticipantRoleType.scribe,
+            roles=[ParticipantRoleType.scribe],
         )
+
+    # add observer (if engage_next_oncall is enabled)
+    incident_role = resolve_role(
+        db_session=db_session, role=ParticipantRoleType.incident_commander, incident=incident
+    )
+    if incident_role and incident_role.engage_next_oncall:
+        oncall_plugin = plugin_service.get_active_instance(
+            db_session=db_session, project_id=incident.project.id, plugin_type="oncall"
+        )
+        if not oncall_plugin:
+            log.debug("Resolved observer role not available since oncall plugin is not active.")
+        else:
+            oncall_email = oncall_plugin.instance.get_next_oncall(
+                service_id=incident_role.service.external_id
+            )
+            # no need to add as observer if already added as commander
+            if oncall_email and commander_email != oncall_email:
+                participant_flows.add_participant(
+                    oncall_email,
+                    incident,
+                    db_session,
+                    service_id=incident_role.service.id,
+                    roles=[ParticipantRoleType.observer],
+                )
 
     return incident
 
 
-def update(*, db_session, incident: Incident, incident_in: IncidentUpdate) -> Incident:
+def update(*, db_session: Session, incident: Incident, incident_in: IncidentUpdate) -> Incident:
     """Updates an existing incident."""
     incident_type = incident_type_service.get_by_name_or_default(
         db_session=db_session,
@@ -272,17 +341,20 @@ def update(*, db_session, incident: Incident, incident_in: IncidentUpdate) -> In
         incident_type_in=incident_in.incident_type,
     )
 
-    incident_priority = incident_priority_service.get_by_name_or_default(
-        db_session=db_session,
-        project_id=incident.project.id,
-        incident_priority_in=incident_in.incident_priority,
-    )
-
     incident_severity = incident_severity_service.get_by_name_or_default(
         db_session=db_session,
         project_id=incident.project.id,
         incident_severity_in=incident_in.incident_severity,
     )
+
+    if incident_in.status == IncidentStatus.stable and incident.project.stable_priority:
+        incident_priority = incident.project.stable_priority
+    else:
+        incident_priority = incident_priority_service.get_by_name_or_default(
+            db_session=db_session,
+            project_id=incident.project.id,
+            incident_priority_in=incident_in.incident_priority,
+        )
 
     cases = []
     for c in incident_in.cases:
@@ -307,6 +379,22 @@ def update(*, db_session, incident: Incident, incident_in: IncidentUpdate) -> In
                 db_session=db_session, incident_cost_in=incident_cost
             )
         )
+
+    # Update total incident response cost if incident type has changed.
+    if incident_type.id != incident.incident_type.id:
+        incident_cost_service.update_incident_response_cost(
+            incident_id=incident.id, db_session=db_session
+        )
+        # if the new incident type has plugin metadata and the
+        # project key of the ticket is the same, also update the ticket with the new metadata
+        if incident_type.plugin_metadata:
+            ticket_flows.update_incident_ticket_metadata(
+                db_session=db_session,
+                ticket_id=incident.ticket.resource_id,
+                project_id=incident.project.id,
+                incident_id=incident.id,
+                incident_type=incident_type,
+            )
 
     update_data = incident_in.dict(
         skip_defaults=True,
@@ -346,7 +434,72 @@ def update(*, db_session, incident: Incident, incident_in: IncidentUpdate) -> In
     return incident
 
 
-def delete(*, db_session, incident_id: int):
+def delete(*, db_session: Session, incident_id: int):
     """Deletes an existing incident."""
     db_session.query(Incident).filter(Incident.id == incident_id).delete()
     db_session.commit()
+
+
+def generate_incident_summary(*, db_session: Session, incident: Incident) -> str:
+    """Generates a summary of the incident."""
+    # Skip summary for restricted incidents
+    if incident.visibility == Visibility.restricted:
+        return "Incident summary not generated for restricted incident."
+
+    # Skip if no incident review document
+    if not incident.incident_review_document or not incident.incident_review_document.resource_id:
+        log.info(
+            f"Incident summary not generated for incident {incident.id}. No review document found."
+        )
+        return "Incident summary not generated. No review document found."
+
+    # Don't generate if no enabled ai plugin or storage plugin
+    ai_plugin = plugin_service.get_active_instance(
+        db_session=db_session, plugin_type="artificial-intelligence", project_id=incident.project.id
+    )
+    if not ai_plugin:
+        log.info(
+            f"Incident summary not generated for incident {incident.id}. No AI plugin enabled."
+        )
+        return "Incident summary not generated. No AI plugin enabled."
+
+    storage_plugin = plugin_service.get_active_instance(
+        db_session=db_session, plugin_type="storage", project_id=incident.project.id
+    )
+
+    if not storage_plugin:
+        log.info(
+            f"Incident summary not generated for incident {incident.id}. No storage plugin enabled."
+        )
+        return "Incident summary not generated. No storage plugin enabled."
+
+    try:
+        pir_doc = storage_plugin.instance.get(
+            file_id=incident.incident_review_document.resource_id,
+            mime_type="text/plain",
+        )
+        prompt = f"""
+            Given the text of the security post-incident review document below,
+            provide answers to the following questions in a paragraph format.
+            Do not include the questions in your response.
+            1. What is the summary of what happened?
+            2. What were the overall risk(s)?
+            3. How were the risk(s) mitigated?
+            4. How was the incident resolved?
+            5. What are the follow-up tasks?
+
+            {pir_doc}
+        """
+
+        response = ai_plugin.instance.chat_completion(prompt=prompt)
+        summary = response["choices"][0]["message"]["content"]
+
+        incident.summary = summary
+        db_session.add(incident)
+        db_session.commit()
+
+        return summary
+
+    except Exception as e:
+        log.exception(f"Error trying to generate summary for incident {incident.id}: {e}")
+        return "Incident summary not generated. An error occurred."

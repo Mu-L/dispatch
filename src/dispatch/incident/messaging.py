@@ -4,42 +4,57 @@
     :copyright: (c) 2019 by Netflix Inc., see AUTHORS for more
     :license: Apache, see LICENSE for more details.
 """
+
 import logging
+from typing import Optional
+
+from slack_sdk.errors import SlackApiError
+from sqlalchemy.orm import Session
 
 from dispatch.config import DISPATCH_UI_URL
 from dispatch.conversation.enums import ConversationCommands
 from dispatch.database.core import SessionLocal, resolve_attr
+from dispatch.decorators import timer
 from dispatch.document import service as document_service
+from dispatch.email_templates import service as email_template_service
+from dispatch.email_templates.enums import EmailTemplateTypes
+from dispatch.email_templates.models import EmailTemplates
+from dispatch.enums import SubjectNames
+from dispatch.event import service as event_service
+from dispatch.forms.models import Forms
 from dispatch.incident.enums import IncidentStatus
 from dispatch.incident.models import Incident, IncidentRead
-from dispatch.notification import service as notification_service
 from dispatch.messaging.strings import (
+    INCIDENT_CLOSE_REMINDER,
     INCIDENT_CLOSED_INFORMATION_REVIEW_REMINDER_NOTIFICATION,
     INCIDENT_CLOSED_RATING_FEEDBACK_NOTIFICATION,
-    INCIDENT_CLOSE_REMINDER,
     INCIDENT_COMMANDER,
     INCIDENT_COMMANDER_READDED_NOTIFICATION,
+    INCIDENT_COMPLETED_FORM_MESSAGE,
     INCIDENT_MANAGEMENT_HELP_TIPS_MESSAGE,
     INCIDENT_NAME,
     INCIDENT_NAME_WITH_ENGAGEMENT,
+    INCIDENT_NAME_WITH_ENGAGEMENT_NO_SELF_JOIN,
     INCIDENT_NEW_ROLE_NOTIFICATION,
     INCIDENT_NOTIFICATION,
     INCIDENT_NOTIFICATION_COMMON,
     INCIDENT_OPEN_TASKS,
-    INCIDENT_PARTICIPANT_SUGGESTED_READING_ITEM,
-    INCIDENT_PARTICIPANT_WELCOME_MESSAGE,
     INCIDENT_PRIORITY_CHANGE,
-    INCIDENT_RESOURCES_MESSAGE,
     INCIDENT_REVIEW_DOCUMENT,
     INCIDENT_SEVERITY_CHANGE,
     INCIDENT_STATUS_CHANGE,
+    INCIDENT_TASK_ADD_TO_INCIDENT,
     INCIDENT_TYPE_CHANGE,
     MessageType,
+    generate_welcome_message,
 )
+from dispatch.notification import service as notification_service
 from dispatch.participant import service as participant_service
 from dispatch.participant_role import service as participant_role_service
 from dispatch.plugin import service as plugin_service
-
+from dispatch.plugins.dispatch_slack.enums import SlackAPIErrorCode
+from dispatch.task.models import TaskCreate
+from dispatch.types import Subject
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +79,11 @@ def get_suggested_documents(db_session, incident: Incident) -> list:
 
 
 def send_welcome_ephemeral_message_to_participant(
-    participant_email: str, incident: Incident, db_session: SessionLocal
+    *,
+    participant_email: str,
+    incident: Incident,
+    db_session: SessionLocal,
+    welcome_template: Optional[EmailTemplates] = None,
 ):
     """Sends an ephemeral welcome message to the participant."""
     if not incident.conversation:
@@ -93,6 +112,7 @@ def send_welcome_ephemeral_message_to_participant(
         "name": incident.name,
         "title": incident.title,
         "description": incident_description,
+        "visibility": incident.visibility,
         "status": incident.status,
         "type": incident.incident_type.name,
         "type_description": incident.incident_type.description,
@@ -131,7 +151,7 @@ def send_welcome_ephemeral_message_to_participant(
         incident.conversation.channel_id,
         participant_email,
         "Incident Welcome Message",
-        INCIDENT_PARTICIPANT_WELCOME_MESSAGE,
+        generate_welcome_message(welcome_template),
         MessageType.incident_participant_welcome,
         **message_kwargs,
     )
@@ -140,7 +160,11 @@ def send_welcome_ephemeral_message_to_participant(
 
 
 def send_welcome_email_to_participant(
-    participant_email: str, incident: Incident, db_session: SessionLocal
+    *,
+    participant_email: str,
+    incident: Incident,
+    db_session: SessionLocal,
+    welcome_template: Optional[EmailTemplates] = None,
 ):
     """Sends a welcome email to the participant."""
     # we load the incident instance
@@ -161,6 +185,7 @@ def send_welcome_email_to_participant(
         "name": incident.name,
         "title": incident.title,
         "description": incident_description,
+        "visibility": incident.visibility,
         "status": incident.status,
         "type": incident.incident_type.name,
         "type_description": incident.incident_type.description,
@@ -204,7 +229,7 @@ def send_welcome_email_to_participant(
         plugin.instance.send(
             participant_email,
             notification_text,
-            INCIDENT_PARTICIPANT_WELCOME_MESSAGE,
+            generate_welcome_message(welcome_template),
             MessageType.incident_participant_welcome,
             **message_kwargs,
         )
@@ -214,68 +239,84 @@ def send_welcome_email_to_participant(
     log.debug(f"Welcome email sent to {participant_email}.")
 
 
-def send_incident_welcome_participant_messages(
-    participant_email: str, incident: Incident, db_session: SessionLocal
-):
-    """Sends welcome messages to the participant."""
-    # we send the welcome ephemeral message
-    send_welcome_ephemeral_message_to_participant(participant_email, incident, db_session)
-
-    # we send the welcome email
-    send_welcome_email_to_participant(participant_email, incident, db_session)
-
-    log.debug(f"Welcome participant messages sent {participant_email}.")
-
-
-def get_suggested_document_items(incident: Incident, db_session: SessionLocal):
-    """Create the suggested document item message."""
-    suggested_documents = get_suggested_documents(db_session, incident)
-
-    items = []
-    if suggested_documents:
-        # we send the ephemeral message
-        # lets grab the first 5 documents
-        # TODO add more intelligent ranking
-        for i in suggested_documents[:5]:
-            description = i.description
-            if not description:
-                if i.incident:
-                    description = i.incident.title
-
-            items.append({"name": i.name, "weblink": i.weblink, "description": description})
-    return items
-
-
-def send_incident_suggested_reading_messages(
-    incident: Incident, items: list, participant_email: str, db_session: SessionLocal
-):
-    """Sends a suggested reading message to a participant."""
-    if not items:
-        return
-
-    if not incident.conversation:
-        log.warning(
-            "Incident suggested reading message not sent. No conversation available for this incident."
-        )
-        return
-
+def send_completed_form_email(participant_email: str, form: Forms, db_session: SessionLocal):
+    """Sends an email to notify about a completed incident form."""
     plugin = plugin_service.get_active_instance(
-        db_session=db_session, project_id=incident.project.id, plugin_type="conversation"
+        db_session=db_session, project_id=form.project.id, plugin_type="email"
     )
     if not plugin:
-        log.warning("Incident suggested reading message not sent. No conversation plugin enabled.")
+        log.warning("Completed form notification email not sent. No email plugin configured.")
         return
 
-    plugin.instance.send_ephemeral(
-        incident.conversation.channel_id,
-        participant_email,
-        "Suggested Reading",
-        [INCIDENT_PARTICIPANT_SUGGESTED_READING_ITEM],
-        MessageType.incident_participant_suggested_reading,
-        items=items,
+    incident_description = (
+        form.incident.description
+        if len(form.incident.description) <= 500
+        else f"{form.incident.description[:500]}..."
     )
 
-    log.debug(f"Suggested reading ephemeral message sent to {participant_email}.")
+    message_kwargs = {
+        "name": form.incident.name,
+        "title": form.incident.title,
+        "description": incident_description,
+        "status": form.incident.status,
+        "commander_fullname": form.incident.commander.individual.name,
+        "commander_team": form.incident.commander.team,
+        "commander_weblink": form.incident.commander.individual.weblink,
+        "contact_fullname": form.incident.commander.individual.name,
+        "contact_weblink": form.incident.commander.individual.weblink,
+        "form_type": form.form_type.name,
+        "form_type_description": form.form_type.description,
+        "form_weblink": f"{DISPATCH_UI_URL}/{form.project.organization.name}/forms/{form.id}",
+    }
+
+    notification_text = "Incident Form Completed Notification"
+
+    # Can raise exception "tenacity.RetryError: RetryError". (Email may still go through).
+    try:
+        plugin.instance.send(
+            participant_email,
+            notification_text,
+            INCIDENT_COMPLETED_FORM_MESSAGE,
+            MessageType.incident_completed_form_notification,
+            **message_kwargs,
+        )
+    except Exception as e:
+        log.error(f"Error in sending completed form notification email to {participant_email}: {e}")
+
+    log.debug(f"Completed form notification email sent to {participant_email}.")
+
+
+@timer
+def send_incident_welcome_participant_messages(
+    participant_email: str,
+    incident: Incident,
+    db_session: SessionLocal,
+):
+    """Sends welcome messages to the participant."""
+    # check to see if there is an override welcome message template
+    welcome_template = email_template_service.get_by_type(
+        db_session=db_session,
+        project_id=incident.project_id,
+        email_template_type=EmailTemplateTypes.welcome,
+    )
+
+    # we send the welcome ephemeral message
+    send_welcome_ephemeral_message_to_participant(
+        participant_email=participant_email,
+        incident=incident,
+        db_session=db_session,
+        welcome_template=welcome_template,
+    )
+
+    # we send the welcome email
+    send_welcome_email_to_participant(
+        participant_email=participant_email,
+        incident=incident,
+        db_session=db_session,
+        welcome_template=welcome_template,
+    )
+
+    log.debug(f"Welcome participant messages sent {participant_email}.")
 
 
 def send_incident_created_notifications(incident: Incident, db_session: SessionLocal):
@@ -283,7 +324,10 @@ def send_incident_created_notifications(incident: Incident, db_session: SessionL
     notification_template = INCIDENT_NOTIFICATION.copy()
 
     if incident.status != IncidentStatus.closed:
-        notification_template.insert(0, INCIDENT_NAME_WITH_ENGAGEMENT)
+        if incident.project.allow_self_join:
+            notification_template.insert(0, INCIDENT_NAME_WITH_ENGAGEMENT)
+        else:
+            notification_template.insert(0, INCIDENT_NAME_WITH_ENGAGEMENT_NO_SELF_JOIN)
     else:
         notification_template.insert(0, INCIDENT_NAME)
 
@@ -297,6 +341,7 @@ def send_incident_created_notifications(incident: Incident, db_session: SessionL
         "name": incident.name,
         "title": incident.title,
         "description": incident_description,
+        "visibility": incident.visibility,
         "status": incident.status,
         "type": incident.incident_type.name,
         "type_description": incident.incident_type.description,
@@ -339,6 +384,13 @@ def send_incident_created_notifications(incident: Incident, db_session: SessionL
         project_id=incident.project.id,
         class_instance=incident,
         notification_params=notification_params,
+    )
+
+    event_service.log_incident_event(
+        db_session=db_session,
+        source="Dispatch Core App",
+        description="Incident notifications sent",
+        incident_id=incident.id,
     )
 
     log.debug("Incident created notifications sent.")
@@ -422,7 +474,10 @@ def send_incident_update_notifications(
     # we send a notification to the notification conversations and emails
     fyi_notification_template = notification_template.copy()
     if incident.status != IncidentStatus.closed:
-        fyi_notification_template.insert(0, INCIDENT_NAME_WITH_ENGAGEMENT)
+        if incident.project.allow_self_join:
+            fyi_notification_template.insert(0, INCIDENT_NAME_WITH_ENGAGEMENT)
+        else:
+            fyi_notification_template.insert(0, INCIDENT_NAME_WITH_ENGAGEMENT_NO_SELF_JOIN)
     else:
         fyi_notification_template.insert(0, INCIDENT_NAME)
 
@@ -464,18 +519,23 @@ def send_incident_update_notifications(
     log.debug("Incident updated notifications sent.")
 
 
-def send_incident_participant_announcement_message(
-    participant_email: str, incident: Incident, db_session: SessionLocal
+@timer
+def send_participant_announcement_message(
+    participant_email: str,
+    subject: Subject,
+    db_session: Session,
 ):
     """Announces a participant in the conversation."""
-    if not incident.conversation:
+    subject_type = type(subject).__name__
+
+    if not subject.conversation:
         log.warning(
-            "Incident participant announcement message not sent. No conversation available for this incident."
+            f"{subject_type} participant announcement message not sent. No conversation available for this {subject_type.lower()}."
         )
         return
 
     plugin = plugin_service.get_active_instance(
-        db_session=db_session, project_id=incident.project.id, plugin_type="conversation"
+        db_session=db_session, project_id=subject.project.id, plugin_type="conversation"
     )
     if not plugin:
         log.warning(
@@ -483,17 +543,31 @@ def send_incident_participant_announcement_message(
         )
         return
 
-    notification_text = "New Incident Participant"
+    notification_text = f"New {subject_type} Participant"
     notification_type = MessageType.incident_notification
     notification_template = []
 
-    participant = participant_service.get_by_incident_id_and_email(
-        db_session=db_session, incident_id=incident.id, email=participant_email
-    )
+    match subject_type:
+        case SubjectNames.CASE:
+            participant = participant_service.get_by_case_id_and_email(
+                db_session=db_session,
+                case_id=subject.id,
+                email=participant_email,
+            )
+        case SubjectNames.INCIDENT:
+            participant = participant_service.get_by_incident_id_and_email(
+                db_session=db_session,
+                incident_id=subject.id,
+                email=participant_email,
+            )
+        case _:
+            raise Exception(
+                "Unknown subject was passed to send_participant_announcement_message",
+            )
 
     participant_info = {}
     contact_plugin = plugin_service.get_active_instance(
-        db_session=db_session, project_id=incident.project.id, plugin_type="contact"
+        db_session=db_session, project_id=subject.project.id, plugin_type="contact"
     )
     if contact_plugin:
         participant_info = contact_plugin.instance.get(participant_email, db_session=db_session)
@@ -511,15 +585,147 @@ def send_incident_participant_announcement_message(
     for role in participant_active_roles:
         participant_roles.append(role.role)
 
-    participant_avatar_url = plugin.instance.get_participant_avatar_url(participant_email)
+    participant_avatar_url = None
+    try:
+        participant_avatar_url = plugin.instance.get_participant_avatar_url(participant_email)
+    except SlackApiError as e:
+        if e.response["error"] == SlackAPIErrorCode.USERS_NOT_FOUND:
+            log.warning(f"Unable to fetch participant avatar for {participant_email}: {e}")
 
     participant_name_mrkdwn = participant_name
     if participant_weblink:
         participant_name_mrkdwn = f"<{participant_weblink}|{participant_name}>"
 
     blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{notification_text}*"}},
         {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{notification_text}*"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Name:* {participant_name_mrkdwn}\n"
+                    f"*Team*: {participant_team}, {participant_department}\n"
+                    f"*Location*: {participant_location}\n"
+                    f"*{subject_type} Role(s)*: {(', ').join(participant_roles)}\n"
+                ),
+            },
+        },
+    ]
+
+    if participant_avatar_url:
+        blocks[1]["accessory"] = {
+            "type": "image",
+            "image_url": participant_avatar_url,
+            "alt_text": participant_name,
+        }
+
+    try:
+        if subject_type == SubjectNames.CASE and subject.has_thread:
+            plugin.instance.send(
+                subject.conversation.channel_id,
+                notification_text,
+                notification_template,
+                notification_type,
+                blocks=blocks,
+                ts=subject.conversation.thread_id,
+            )
+        else:
+            plugin.instance.send(
+                subject.conversation.channel_id,
+                notification_text,
+                notification_template,
+                notification_type,
+                blocks=blocks,
+            )
+    except SlackApiError as e:
+        if e.response["error"] == SlackAPIErrorCode.USERS_NOT_FOUND:
+            log.warning(f"Failed to send announcement message to {participant_email}: {e}")
+    else:
+        log.debug(f"{subject_type} participant announcement message sent.")
+
+
+@timer
+def bulk_participant_announcement_message(
+    participant_emails: list[str],
+    subject: Subject,
+    db_session: Session,
+):
+    """Announces a list of participants in the conversation."""
+    subject_type = type(subject).__name__
+
+    if not subject.conversation:
+        log.warning(
+            f"{subject_type} participant announcement message not sent. No conversation available for this {subject_type.lower()}."
+        )
+        return
+
+    plugin = plugin_service.get_active_instance(
+        db_session=db_session, project_id=subject.project.id, plugin_type="conversation"
+    )
+    if not plugin:
+        log.warning(
+            "Incident participant announcement message not sent. No conversation plugin enabled."
+        )
+        return
+
+    notification_text = f"{len(participant_emails)} New {subject_type} Participants"
+    notification_type = MessageType.incident_notification
+    notification_template = []
+
+    participant_blocks = []
+    for participant_email in participant_emails:
+        match subject_type:
+            case SubjectNames.CASE:
+                participant = participant_service.get_by_case_id_and_email(
+                    db_session=db_session,
+                    case_id=subject.id,
+                    email=participant_email,
+                )
+            case SubjectNames.INCIDENT:
+                participant = participant_service.get_by_incident_id_and_email(
+                    db_session=db_session,
+                    incident_id=subject.id,
+                    email=participant_email,
+                )
+            case _:
+                raise Exception(
+                    "Unknown subject was passed to send_participant_announcement_message"
+                )
+
+        participant_info = {}
+        contact_plugin = plugin_service.get_active_instance(
+            db_session=db_session, project_id=subject.project.id, plugin_type="contact"
+        )
+
+        if contact_plugin:
+            participant_info = contact_plugin.instance.get(participant_email, db_session=db_session)
+
+        participant_name = participant_info.get("fullname", "Unknown")
+        participant_team = participant_info.get("team", "Unknown")
+        participant_department = participant_info.get("department", "Unknown")
+        participant_location = participant_info.get("location", "Unknown")
+        participant_weblink = participant_info.get("weblink", DISPATCH_UI_URL)
+
+        participant_active_roles = participant_role_service.get_all_active_roles(
+            db_session=db_session, participant_id=participant.id
+        )
+        participant_roles = [role.role for role in participant_active_roles]
+
+        participant_avatar_url = None
+        try:
+            participant_avatar_url = plugin.instance.get_participant_avatar_url(participant_email)
+        except SlackApiError as e:
+            if e.response["error"] == SlackAPIErrorCode.USERS_NOT_FOUND:
+                log.warning(f"Unable to fetch participant avatar for {participant_email}: {e}")
+
+        participant_name_mrkdwn = participant_name
+        if participant_weblink:
+            participant_name_mrkdwn = f"<{participant_weblink}|{participant_name}>"
+
+        participant_block = {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
@@ -530,23 +736,48 @@ def send_incident_participant_announcement_message(
                     f"*Incident Role(s)*: {(', ').join(participant_roles)}\n"
                 ),
             },
-            "accessory": {
+        }
+
+        if participant_avatar_url:
+            participant_block["accessory"] = {
                 "type": "image",
                 "image_url": participant_avatar_url,
                 "alt_text": participant_name,
-            },
+            }
+
+        participant_blocks.append(participant_block)
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{notification_text}*"},
         },
+        *participant_blocks,
     ]
 
-    plugin.instance.send(
-        incident.conversation.channel_id,
-        notification_text,
-        notification_template,
-        notification_type,
-        blocks=blocks,
-    )
-
-    log.debug("Incident participant announcement message sent.")
+    try:
+        if subject_type == SubjectNames.CASE and subject.has_thread:
+            plugin.instance.send(
+                subject.conversation.channel_id,
+                notification_text,
+                notification_template,
+                notification_type,
+                blocks=blocks,
+                ts=subject.conversation.thread_id,
+            )
+        else:
+            plugin.instance.send(
+                subject.conversation.channel_id,
+                notification_text,
+                notification_template,
+                notification_type,
+                blocks=blocks,
+            )
+    except SlackApiError as e:
+        if e.response["error"] == SlackAPIErrorCode.USERS_NOT_FOUND:
+            log.warning(f"Failed to send announcement messages: {e}")
+    else:
+        log.debug(f"{subject_type} participant announcement messages sent.")
 
 
 def send_incident_commander_readded_notification(incident: Incident, db_session: SessionLocal):
@@ -719,71 +950,6 @@ def send_incident_review_document_notification(
     log.debug("Incident review document notification sent.")
 
 
-def send_incident_resources_ephemeral_message_to_participant(
-    user_id: str, incident: Incident, db_session: SessionLocal
-):
-    """Sends the list of incident resources to the participant via an ephemeral message."""
-    plugin = plugin_service.get_active_instance(
-        db_session=db_session, project_id=incident.project.id, plugin_type="conversation"
-    )
-    if not plugin:
-        log.warning("Incident resource message not sent, no conversation plugin enabled.")
-        return
-
-    incident_description = (
-        incident.description
-        if len(incident.description) <= 500
-        else f"{incident.description[:500]}..."
-    )
-
-    message_kwargs = {
-        "title": incident.title,
-        "description": incident_description,
-        "commander_fullname": incident.commander.individual.name,
-        "commander_team": incident.commander.team,
-        "commander_weblink": incident.commander.individual.weblink,
-        "reporter_fullname": incident.reporter.individual.name,
-        "reporter_team": incident.reporter.team,
-        "reporter_weblink": incident.reporter.individual.weblink,
-        "document_weblink": resolve_attr(incident, "incident_document.weblink"),
-        "storage_weblink": resolve_attr(incident, "storage.weblink"),
-        "ticket_weblink": resolve_attr(incident, "ticket.weblink"),
-        "conference_weblink": resolve_attr(incident, "conference.weblink"),
-        "conference_challenge": resolve_attr(incident, "conference.conference_challenge"),
-    }
-
-    if incident.incident_review_document:
-        message_kwargs.update(
-            {"review_document_weblink": incident.incident_review_document.weblink}
-        )
-
-    faq_doc = document_service.get_incident_faq_document(
-        db_session=db_session, project_id=incident.project_id
-    )
-    if faq_doc:
-        message_kwargs.update({"faq_weblink": faq_doc.weblink})
-
-    conversation_reference = document_service.get_conversation_reference_document(
-        db_session=db_session, project_id=incident.project_id
-    )
-    if conversation_reference:
-        message_kwargs.update(
-            {"conversation_commands_reference_document_weblink": conversation_reference.weblink}
-        )
-
-    # we send the ephemeral message
-    plugin.instance.send_ephemeral(
-        incident.conversation.channel_id,
-        user_id,
-        "Incident Resources Message",
-        INCIDENT_RESOURCES_MESSAGE,
-        MessageType.incident_resources_message,
-        **message_kwargs,
-    )
-
-    log.debug(f"List of incident resources sent to {user_id} via ephemeral message.")
-
-
 def send_incident_close_reminder(incident: Incident, db_session: SessionLocal):
     """
     Sends a direct message to the incident commander reminding
@@ -805,7 +971,8 @@ def send_incident_close_reminder(incident: Incident, db_session: SessionLocal):
         {
             "command": update_command,
             "name": incident.name,
-            "ticket_weblink": incident.ticket.weblink,
+            "dispatch_ui_incident_url": f"{DISPATCH_UI_URL}/{incident.project.organization.name}/incidents/{incident.name}",  # noqa
+            "conversation_weblink": resolve_attr(incident, "conversation.weblink"),
             "title": incident.title,
             "status": incident.status,
         }
@@ -939,7 +1106,6 @@ def send_incident_management_help_tips_message(incident: Incident, db_session: S
         return
 
     engage_oncall_command = plugin.instance.get_command_name(ConversationCommands.engage_oncall)
-    list_resources_command = plugin.instance.get_command_name(ConversationCommands.list_resources)
     executive_report_command = plugin.instance.get_command_name(
         ConversationCommands.executive_report
     )
@@ -951,10 +1117,10 @@ def send_incident_management_help_tips_message(incident: Incident, db_session: S
             "name": incident.name,
             "title": incident.title,
             "engage_oncall_command": engage_oncall_command,
-            "list_resources_command": list_resources_command,
             "executive_report_command": executive_report_command,
             "tactical_report_command": tactical_report_command,
             "update_command": update_command,
+            "conversation_weblink": resolve_attr(incident, "conversation.weblink"),
         }
     ]
 
@@ -1003,3 +1169,45 @@ def send_incident_open_tasks_ephemeral_message(
     )
 
     log.debug(f"Open incident tasks message sent to {participant_email}.")
+
+
+def send_task_add_ephemeral_message(
+    *,
+    assignee_email: str,
+    incident: Incident,
+    db_session: SessionLocal,
+    task: TaskCreate,
+):
+    """
+    Sends an ephemeral message to the assignee letting them know why they have been added to the incident.
+    """
+
+    plugin = plugin_service.get_active_instance(
+        db_session=db_session, project_id=incident.project.id, plugin_type="conversation"
+    )
+    if not plugin:
+        log.warning("Task add message not sent, no conversation plugin enabled.")
+        return
+
+    notification_text = "Task Added Notification"
+    message_type = MessageType.task_add_to_incident
+    message_template = INCIDENT_TASK_ADD_TO_INCIDENT
+    message_kwargs = {
+        "title": notification_text,
+        "dispatch_ui_url": f"{DISPATCH_UI_URL}/{incident.project.organization.name}/tasks?incident={incident.name}",
+        "task_description": task.description,
+        "task_weblink": task.weblink,
+    }
+    try:
+        plugin.instance.send_ephemeral(
+            incident.conversation.channel_id,
+            assignee_email,
+            notification_text,
+            message_template,
+            message_type,
+            **message_kwargs,
+        )
+
+        log.debug(f"Task add message sent to {assignee_email}.")
+    except Exception as e:
+        log.error(f"Error in sending task add message to {assignee_email}: {e}")

@@ -3,55 +3,52 @@
     :items="items"
     :label="label"
     :loading="loading"
-    :search-input.sync="search"
-    @update:search-input="getFilteredData()"
+    v-model:search="search"
+    @update:search="getFilteredData()"
     chips
     clearable
-    deletable-chips
+    closable-chips
     hide-selected
-    item-text="name"
+    item-title="name"
     item-value="id"
     multiple
     no-filter
     v-model="incidentType"
+    :menu-props="{ maxWidth: 0 }"
   >
-    <template v-slot:no-data>
+    <template #no-data>
       <v-list-item>
-        <v-list-item-content>
-          <v-list-item-title>
-            No incident types matching "
-            <strong>{{ search }}</strong
-            >".
-          </v-list-item-title>
-        </v-list-item-content>
+        <v-list-item-title>
+          No incident types matching "
+          <strong>{{ search }}</strong
+          >".
+        </v-list-item-title>
       </v-list-item>
     </template>
-    <template v-slot:selection="{ item, index }">
-      <v-chip close @click:close="value.splice(index, 1)">
-        <span v-if="!project"
-          ><span v-if="item.project">{{ item.project.name }}/</span></span
-        >{{ item.name }}
+    <template #chip="{ item, props }">
+      <v-chip v-bind="props">
+        <span>
+          <span v-if="item.raw.project">{{ item.raw.project.display_name }}/</span>
+        </span>
+        {{ item.raw.name }}
       </v-chip>
     </template>
-    <template v-slot:item="data">
-      <template>
-        <v-list-item-content>
-          <v-list-item-title>
-            <span v-if="!project"
-              ><span v-if="data.item.project">{{ data.item.project.name }}/</span></span
-            >{{ data.item.name }}
-          </v-list-item-title>
-          <v-list-item-subtitle style="width: 200px" class="text-truncate">
-            {{ data.item.description }}
-          </v-list-item-subtitle>
-        </v-list-item-content>
-      </template>
+    <template #item="{ props, item }">
+      <v-list-item v-bind="props" :title="null">
+        <v-list-item-title>
+          <span>
+            <span v-if="item.raw.project">{{ item.raw.project.display_name }}/</span>
+          </span>
+          {{ item.raw.name }}
+        </v-list-item-title>
+        <v-list-item-subtitle :title="item.raw.description">
+          {{ item.raw.description }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
-    <template v-slot:append-item>
+    <template #append-item>
       <v-list-item v-if="more" @click="loadMore()">
-        <v-list-item-content>
-          <v-list-item-subtitle> Load More </v-list-item-subtitle>
-        </v-list-item-content>
+        <v-list-item-subtitle> Load More </v-list-item-subtitle>
       </v-list-item>
     </template>
   </v-combobox>
@@ -67,7 +64,7 @@ export default {
   name: "IncidentTypeComboBox",
 
   props: {
-    value: {
+    modelValue: {
       type: Array,
       default: function () {
         return []
@@ -90,7 +87,7 @@ export default {
       loading: false,
       items: [],
       more: false,
-      numItems: 5,
+      numItems: 15,
       search: null,
     }
   },
@@ -98,28 +95,34 @@ export default {
   computed: {
     incidentType: {
       get() {
-        return cloneDeep(this.value)
+        return cloneDeep(this.modelValue)
       },
       set(value) {
         this.search = null
-        this._incidentTypes = value.filter((v) => {
+        const incidentTypes = value.filter((v) => {
           if (typeof v === "string") {
             return false
           }
           return true
         })
-        this.$emit("input", this._incidentTypes)
+        this.$emit("update:modelValue", incidentTypes)
       },
     },
   },
 
   created() {
     this.fetchData()
+    this.$watch(
+      (vm) => [vm.project],
+      () => {
+        this.fetchData()
+      }
+    )
   },
 
   methods: {
     loadMore() {
-      this.numItems = this.numItems + 5
+      this.numItems = this.numItems + 10
       this.fetchData()
     },
     fetchData() {
@@ -128,18 +131,9 @@ export default {
 
       let filterOptions = {
         q: this.search,
-        sortBy: ["name"],
-        descending: [false],
+        sortBy: ["project_id", "name"],
+        descending: [false, false],
         itemsPerPage: this.numItems,
-      }
-
-      if (this.project) {
-        filterOptions = {
-          ...filterOptions,
-          filters: {
-            project: [this.project],
-          },
-        }
       }
 
       let enabledFilter = [
@@ -151,8 +145,19 @@ export default {
         },
       ]
 
+      if (this.project && this.project.length > 0) {
+        const project_ids = this.project.map((p) => p.id)
+        enabledFilter.push({
+          model: "IncidentType",
+          field: "project_id",
+          op: "in",
+          value: project_ids,
+        })
+      }
+
       filterOptions = SearchUtils.createParametersFromTableOptions(
         { ...filterOptions },
+        "IncidentType",
         enabledFilter
       )
 

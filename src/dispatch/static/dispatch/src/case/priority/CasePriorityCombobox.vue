@@ -3,48 +3,44 @@
     :items="items"
     :label="label"
     :loading="loading"
-    :search-input.sync="search"
-    @update:search-input="getFilteredData()"
+    v-model:search="search"
+    @update:search="getFilteredData()"
     chips
     clearable
-    deletable-chips
+    closable-chips
     hide-selected
-    item-text="id"
+    item-title="id"
     multiple
     no-filter
     v-model="casePriority"
   >
-    <template v-slot:no-data>
+    <template #no-data>
       <v-list-item>
-        <v-list-item-content>
-          <v-list-item-title>
-            No case priorities matching "
-            <strong>{{ search }}</strong
-            >".
-          </v-list-item-title>
-        </v-list-item-content>
+        <v-list-item-title>
+          No case priorities matching "
+          <strong>{{ search }}</strong
+          >".
+        </v-list-item-title>
       </v-list-item>
     </template>
-    <template v-slot:selection="{ item, index }">
-      <v-chip close @click:close="value.splice(index, 1)">
-        <span v-if="!project"> {{ item.project.name }}/ </span>{{ item.name }}
+    <template #chip="{ item, props }">
+      <v-chip v-bind="props">
+        <span>{{ item.raw.project.display_name }}/</span>{{ item.raw.name }}
       </v-chip>
     </template>
-    <template v-slot:item="data">
-      <v-list-item-content>
+    <template #item="data">
+      <v-list-item v-bind="data.props" :title="null">
         <v-list-item-title>
-          <span v-if="!project">{{ data.item.project.name }}/</span>{{ data.item.name }}
+          <span>{{ data.item.raw.project.display_name }}/</span>{{ data.item.raw.name }}
         </v-list-item-title>
-        <v-list-item-subtitle style="width: 200px" class="text-truncate">
-          {{ data.item.description }}
+        <v-list-item-subtitle :title="data.item.raw.description">
+          {{ data.item.raw.description }}
         </v-list-item-subtitle>
-      </v-list-item-content>
+      </v-list-item>
     </template>
-    <template v-slot:append-item>
+    <template #append-item>
       <v-list-item v-if="more" @click="loadMore()">
-        <v-list-item-content>
-          <v-list-item-subtitle> Load More </v-list-item-subtitle>
-        </v-list-item-content>
+        <v-list-item-subtitle> Load More </v-list-item-subtitle>
       </v-list-item>
     </template>
   </v-combobox>
@@ -59,7 +55,7 @@ import CasePriorityApi from "@/case/priority/api"
 export default {
   name: "CasePriorityComboBox",
   props: {
-    value: {
+    modelValue: {
       type: Array,
       default: function () {
         return []
@@ -90,17 +86,17 @@ export default {
   computed: {
     casePriority: {
       get() {
-        return cloneDeep(this.value)
+        return cloneDeep(this.modelValue)
       },
       set(value) {
         this.search = null
-        this._casePriorities = value.filter((v) => {
+        const casePriorities = value.filter((v) => {
           if (typeof v === "string") {
             return false
           }
           return true
         })
-        this.$emit("input", this._casePriorities)
+        this.$emit("update:modelValue", casePriorities)
       },
     },
   },
@@ -115,18 +111,9 @@ export default {
       this.loading = "error"
       let filterOptions = {
         q: this.search,
-        sortBy: ["name"],
-        descending: [false],
+        sortBy: ["project_id", "view_order"],
+        descending: [false, false],
         itemsPerPage: this.numItems,
-      }
-
-      if (this.project) {
-        filterOptions = {
-          ...filterOptions,
-          filters: {
-            project: [this.project],
-          },
-        }
       }
 
       let enabledFilter = [
@@ -138,8 +125,19 @@ export default {
         },
       ]
 
+      if (this.project && this.project.length > 0) {
+        const project_ids = this.project.map((p) => p.id)
+        enabledFilter.push({
+          model: "CasePriority",
+          field: "project_id",
+          op: "in",
+          value: project_ids,
+        })
+      }
+
       filterOptions = SearchUtils.createParametersFromTableOptions(
         { ...filterOptions },
+        "CasePriority",
         enabledFilter
       )
 
@@ -164,6 +162,12 @@ export default {
 
   created() {
     this.fetchData()
+    this.$watch(
+      (vm) => [vm.project],
+      () => {
+        this.fetchData()
+      }
+    )
   },
 }
 </script>

@@ -7,9 +7,9 @@ from sqlalchemy.sql.schema import UniqueConstraint
 from sqlalchemy_utils import TSVectorType
 
 from dispatch.database.core import Base
-from dispatch.models import DispatchBase, TimeStampMixin, ProjectMixin, PrimaryKey
+from dispatch.models import DispatchBase, TimeStampMixin, ProjectMixin, PrimaryKey, Pagination
 from dispatch.project.models import ProjectRead
-from dispatch.tag_type.models import TagTypeRead, TagTypeCreate, TagTypeUpdate, TagTypeReadMinimal
+from dispatch.tag_type.models import TagTypeRead, TagTypeCreate, TagTypeUpdate
 
 
 class Tag(Base, TimeStampMixin, ProjectMixin):
@@ -21,6 +21,7 @@ class Tag(Base, TimeStampMixin, ProjectMixin):
     description = Column(String)
     uri = Column(String)
     source = Column(String)
+    external_id = Column(String)
     discoverable = Column(Boolean, default=True)
 
     # Relationships
@@ -28,7 +29,9 @@ class Tag(Base, TimeStampMixin, ProjectMixin):
     tag_type = relationship("TagType", backref="tag")
 
     # the catalog here is simple to help matching "named entities"
-    search_vector = Column(TSVectorType("name", regconfig="pg_catalog.simple"))
+    search_vector = Column(
+        TSVectorType("name", "description", "external_id", regconfig="pg_catalog.simple")
+    )
 
 
 # Pydantic models
@@ -37,6 +40,7 @@ class TagBase(DispatchBase):
     source: Optional[str] = Field(None, nullable=True)
     uri: Optional[str] = Field(None, nullable=True)
     discoverable: Optional[bool] = True
+    external_id: Optional[str] = Field(None, nullable=True)
     description: Optional[str] = Field(None, nullable=True)
 
 
@@ -57,16 +61,5 @@ class TagRead(TagBase):
     project: ProjectRead
 
 
-class TagReadMinimal(DispatchBase):
-    id: PrimaryKey
-    name: Optional[str] = Field(None, nullable=True)
-    source: Optional[str] = Field(None, nullable=True)
-    uri: Optional[str] = Field(None, nullable=True)
-    discoverable: Optional[bool] = True
-    description: Optional[str] = Field(None, nullable=True)
-    tag_type: Optional[TagTypeRead]
-
-
-class TagPagination(DispatchBase):
+class TagPagination(Pagination):
     items: List[TagRead]
-    total: int

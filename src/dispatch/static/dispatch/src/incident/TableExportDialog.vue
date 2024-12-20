@@ -1,105 +1,112 @@
 <template>
   <v-dialog v-model="showExport" persistent max-width="800px">
-    <template v-slot:activator="{ on }">
-      <v-btn color="secondary" class="ml-2" v-on="on"> Export </v-btn>
+    <template #activator="{ props }">
+      <v-btn color="secondary" class="ml-2" v-bind="props"> Export </v-btn>
     </template>
     <v-card>
       <v-card-title>
-        <span class="headline">Export Incidents</span>
+        <span class="text-h5">Export Incidents</span>
       </v-card-title>
       <v-stepper v-model="e1">
         <v-stepper-header>
-          <v-stepper-step :complete="e1 > 1" step="1" editable> Filter Data </v-stepper-step>
+          <v-stepper-item :complete="e1 > 1" :value="1" editable> Filter Data </v-stepper-item>
           <v-divider />
-          <v-stepper-step :complete="e1 > 2" step="2" editable> Select Fields </v-stepper-step>
+          <v-stepper-item :complete="e1 > 2" :value="2" editable> Select Fields </v-stepper-item>
           <v-divider />
-          <v-stepper-step step="3" editable> Preview </v-stepper-step>
+          <v-stepper-item :value="3" editable> Preview </v-stepper-item>
         </v-stepper-header>
-        <v-stepper-items>
-          <v-stepper-content step="1">
-            <v-list dense>
-              <v-list-item>
-                <v-list-item-content>
+        <v-stepper-window>
+          <v-stepper-window-item :value="1">
+            <div class="scrollable-container">
+              <v-list density="compact">
+                <v-list-item>
                   <date-window-input v-model="reported_at" label="Reported At" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
+                </v-list-item>
+                <v-list-item>
                   <project-combobox v-model="project" label="Projects" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
-                  <tag-filter-auto-complete v-model="tag" label="Tags" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
+                </v-list-item>
+                <v-list-item>
+                  <tag-filter-auto-complete
+                    v-model="tag"
+                    label="Tags"
+                    model="incident"
+                    :project="project"
+                  />
+                </v-list-item>
+                <v-list-item>
                   <tag-type-filter-combobox v-model="tag_type" label="Tag Types" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
+                </v-list-item>
+                <v-list-item>
                   <incident-type-combobox v-model="incident_type" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
+                </v-list-item>
+                <v-list-item>
                   <incident-severity-combobox v-model="incident_severity" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
+                </v-list-item>
+                <v-list-item>
                   <incident-priority-combobox v-model="incident_priority" />
-                </v-list-item-content>
-              </v-list-item>
-              <v-list-item>
-                <v-list-item-content>
+                </v-list-item>
+                <v-list-item>
                   <incident-status-multi-select v-model="status" />
-                </v-list-item-content>
-              </v-list-item>
-            </v-list>
-            <v-spacer />
-            <v-btn @click="closeExport()" text> Cancel </v-btn>
-            <v-btn color="info" @click="e1 = 2"> Continue </v-btn>
-          </v-stepper-content>
-          <v-stepper-content step="2">
-            <v-autocomplete
-              v-model="selectedFields"
-              :items="allFields"
-              label="Fields"
-              multiple
-              chips
-              return-object
-            />
-            <v-spacer />
-            <v-btn @click="closeExport()" text> Cancel </v-btn>
-            <v-btn color="info" @click="e1 = 3"> Continue </v-btn>
-          </v-stepper-content>
-          <v-stepper-content step="3">
-            <v-data-table
-              hide-default-footer
-              :headers="selectedFields"
-              :items="items"
-              :loading="previewRowsLoading"
-            >
-              <template v-slot:item.incident_severity.name="{ item }">
-                <incident-severity :severity="item.incident_severity.name" />
-              </template>
-              <template v-slot:item.incident_priority.name="{ item }">
-                <incident-priority :priority="item.incident_priority.name" />
-              </template>
-              <template v-slot:item.status="{ item }">
-                <incident-status :status="item.status" :id="item.id" />
-              </template>
-            </v-data-table>
-            <v-spacer />
-            <v-btn @click="closeExport()" text> Cancel </v-btn>
-            <v-badge :value="total" overlap color="info" bordered :content="total">
-              <v-btn color="info" @click="exportToCSV()" :loading="exportLoading"> Export </v-btn>
-            </v-badge>
-          </v-stepper-content>
-        </v-stepper-items>
+                </v-list-item>
+              </v-list>
+              <v-spacer />
+              <v-btn @click="closeExport()" variant="text"> Cancel </v-btn>
+              <v-btn color="info" @click="e1 = 2"> Continue </v-btn>
+            </div>
+          </v-stepper-window-item>
+          <v-stepper-window-item :value="2">
+            <div class="scrollable-container">
+              <v-autocomplete
+                v-model="selectedFields"
+                :items="allFields"
+                item-title="text"
+                label="Fields"
+                multiple
+                chips
+                return-object
+              />
+              <v-spacer />
+              <v-btn @click="closeExport()" variant="text"> Cancel </v-btn>
+              <v-btn color="info" @click="e1 = 3"> Continue </v-btn>
+            </div>
+          </v-stepper-window-item>
+          <v-stepper-window-item :value="3">
+            <div class="scrollable-container">
+              <v-data-table
+                hide-default-footer
+                :headers="selectedFields"
+                :items="items"
+                :loading="previewRowsLoading"
+              >
+                <template #item.incident_severity.name="{ item }">
+                  <incident-severity
+                    :severity="item.incident_severity.name"
+                    :color="item.incident_severity.color"
+                  />
+                </template>
+                <template #item.incident_priority.name="{ item }">
+                  <incident-priority
+                    :priority="item.incident_priority.name"
+                    :color="item.incident_priority.color"
+                  />
+                </template>
+                <template #item.status="{ item }">
+                  <incident-status :status="item.status" :id="item.id" />
+                </template>
+                <template #item.tags="{ item }">
+                  <span v-for="tag in item.tags" :key="tag">
+                    <v-chip> {{ tag.tag_type.name }}/{{ tag.name }} </v-chip>
+                  </span>
+                </template>
+              </v-data-table>
+              <v-spacer />
+              <v-btn @click="closeExport()" variant="text"> Cancel </v-btn>
+              <v-badge :model-value="!!total" color="info" bordered :content="total">
+                <v-btn color="info" @click="exportToCSV()" :loading="exportLoading"> Export </v-btn>
+              </v-badge>
+            </div>
+          </v-stepper-window-item>
+        </v-stepper-window>
       </v-stepper>
     </v-card>
   </v-dialog>
@@ -122,7 +129,7 @@ import IncidentStatus from "@/incident/status/IncidentStatus.vue"
 import IncidentStatusMultiSelect from "@/incident/status/IncidentStatusMultiSelect.vue"
 import IncidentTypeCombobox from "@/incident/type/IncidentTypeCombobox.vue"
 import ProjectCombobox from "@/project/ProjectCombobox.vue"
-import TagFilterAutoComplete from "@/tag/TagFilterAutoComplete.vue"
+import TagFilterAutoComplete from "@/tag/TagPicker.vue"
 import TagTypeFilterCombobox from "@/tag_type/TagTypeFilterCombobox.vue"
 
 export default {
@@ -146,41 +153,188 @@ export default {
     return {
       e1: 1,
       selectedFields: [
-        { text: "Name", value: "name", sortable: false },
-        { text: "Title", value: "title", sortable: false },
-        { text: "Description", value: "description", sortable: false },
-        { text: "Resolution", value: "resolution", sortable: false },
-        { text: "Status", value: "status", sortable: false },
-        { text: "Incident Type", value: "incident_type.name", sortable: false },
-        { text: "Incident Severity", value: "incident_severity.name", sortable: false },
+        { text: "Name", title: "Name", key: "name", value: "name", sortable: false },
+        { text: "Title", title: "Title", key: "title", value: "title", sortable: false },
+        {
+          text: "Description",
+          title: "Description",
+          key: "description",
+          value: "description",
+          sortable: false,
+        },
+        {
+          text: "Resolution",
+          title: "Resolution",
+          key: "resolution",
+          value: "resolution",
+          sortable: false,
+        },
+        { text: "Status", title: "Status", key: "status", value: "status", sortable: false },
+        {
+          text: "Incident Type",
+          title: "Incident Type",
+          key: "incident_type.name",
+          value: "incident_type.name",
+          sortable: false,
+        },
+        {
+          text: "Incident Severity",
+          title: "Incident Severity",
+          key: "incident_severity.name",
+          value: "incident_severity.name",
+          sortable: false,
+        },
       ],
       allFields: [
-        { text: "Name", value: "name", sortable: false },
-        { text: "Title", value: "title", sortable: false },
-        { text: "Status", value: "status", sortable: false },
-        { text: "Total Cost", value: "total_cost", sortable: false },
-        { text: "Visibility", value: "visibility", sortable: false },
-        { text: "Description", value: "description", sortable: false },
-        { text: "Resolution", value: "resolution", sortable: false },
-        { text: "Incident Type", value: "incident_type.name", sortable: false },
-        { text: "Incident Severity", value: "incident_severity.name", sortable: false },
-        { text: "Incident Priority", value: "incident_priority.name", sortable: false },
-        { text: "Reporter", value: "reporter.individual.email", sortable: false },
-        { text: "Commander", value: "commander.individual.email", sortable: false },
-        { text: "Reporters Location", value: "reporters_location", sortable: false },
-        { text: "Commanders Location", value: "commanders_location", sortable: false },
-        { text: "Participants Location", value: "participants_location", sortable: false },
-        { text: "Participants Team", value: "participants_team", sortable: false },
-        { text: "Reported At", value: "reported_at", sortable: false },
-        { text: "Stable At", value: "stable_at", sortable: false },
-        { text: "Closed At", value: "closed_at", sortable: false },
-        { text: "Incident Document Weblink", value: "incident_document.weblink", sortable: false },
+        { text: "Name", title: "Name", key: "name", value: "name", sortable: false },
+        {
+          text: "Title",
+          title: "Title",
+          key: "title",
+          value: "title",
+          sortable: false,
+        },
+        { text: "Status", title: "Status", key: "status", value: "status", sortable: false },
+        {
+          text: "Total Cost",
+          title: "Total Cost",
+          key: "total_cost",
+          value: "total_cost",
+          sortable: false,
+        },
+        {
+          text: "Visibility",
+          title: "Visibility",
+          key: "visibility",
+          value: "visibility",
+          sortable: false,
+        },
+        {
+          text: "Description",
+          title: "Description",
+          key: "description",
+          value: "description",
+          sortable: false,
+        },
+        {
+          text: "Resolution",
+          title: "Resolution",
+          key: "resolution",
+          value: "resolution",
+          sortable: false,
+        },
+        {
+          text: "Incident Type",
+          title: "Incident Type",
+          key: "incident_type.name",
+          value: "incident_type.name",
+          sortable: false,
+        },
+        {
+          text: "Incident Severity",
+          title: "Incident Severity",
+          key: "incident_severity.name",
+          value: "incident_severity.name",
+          sortable: false,
+        },
+        {
+          text: "Incident Priority",
+          title: "Incident Priority",
+          key: "incident_priority.name",
+          value: "incident_priority.name",
+          sortable: false,
+        },
+        {
+          text: "Reporter",
+          title: "Reporter",
+          key: "reporter.individual.email",
+          value: "reporter.individual.email",
+          sortable: false,
+        },
+        {
+          text: "Commander",
+          title: "Commander",
+          key: "commander.individual.email",
+          value: "commander.individual.email",
+          sortable: false,
+        },
+        {
+          text: "Reporters Location",
+          title: "Reporters Location",
+          key: "reporters_location",
+          value: "reporters_location",
+          sortable: false,
+        },
+        {
+          text: "Commanders Location",
+          title: "Commanders Location",
+          key: "commanders_location",
+          value: "commanders_location",
+          sortable: false,
+        },
+        {
+          text: "Participants Location",
+          title: "Participants Location",
+          key: "participants_location",
+          value: "participants_location",
+          sortable: false,
+        },
+        {
+          text: "Participants Team",
+          title: "Participants Team",
+          key: "participants_team",
+          value: "participants_team",
+          sortable: false,
+        },
+        {
+          text: "Reported At",
+          title: "Reported At",
+          key: "reported_at",
+          value: "reported_at",
+          sortable: false,
+        },
+        {
+          text: "Stable At",
+          title: "Stable At",
+          key: "stable_at",
+          value: "stable_at",
+          sortable: false,
+        },
+        {
+          text: "Closed At",
+          title: "Closed At",
+          key: "closed_at",
+          value: "closed_at",
+          sortable: false,
+        },
+        {
+          text: "Tags",
+          title: "Tags",
+          key: "tags",
+          value: "tags",
+          sortable: false,
+        },
+        {
+          text: "Incident Document Weblink",
+          title: "Incident Document Weblink",
+          key: "incident_document.weblink",
+          value: "incident_document.weblink",
+          sortable: false,
+        },
         {
           text: "Incident Review Document Weblink",
+          title: "Incident Review Document Weblink",
+          key: "incident_review_document.weblink",
           value: "incident_review_document.weblink",
           sortable: false,
         },
-        { text: "Storage Weblink", value: "storage.weblink", sortable: false },
+        {
+          text: "Storage Weblink",
+          title: "Storage Weblink",
+          key: "storage.weblink",
+          value: "storage.weblink",
+          sortable: false,
+        },
       ],
       previewRowsLoading: false,
       exportLoading: false,
@@ -224,7 +378,15 @@ export default {
       return IncidentApi.getAll(params)
         .then((response) => {
           let items = response.data.items
-          Util.exportCSV(items, "incident-details-export.csv")
+          items = items.map((item) => {
+            if ("tags" in item) {
+              const tags = item["tags"].map((tag) => `${tag.tag_type.name}/${tag.name}`)
+              item["tags"] = tags.join(", ")
+            }
+            return item
+          })
+          const fieldOrder = this.selectedFields.map((field) => field.value)
+          Util.exportCSVOrdered(items, "incident-details-export.csv", fieldOrder)
           this.exportLoading = false
           this.closeExport()
         })
@@ -255,3 +417,10 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+.scrollable-container {
+  max-height: 60vh; /* Adjust as needed */
+  overflow-y: auto;
+}
+</style>

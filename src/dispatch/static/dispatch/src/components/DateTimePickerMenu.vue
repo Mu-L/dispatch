@@ -3,71 +3,34 @@
     ref="menu"
     v-model="display"
     :close-on-content-click="false"
-    :nudge-right="40"
-    transition="scale-transition"
-    offset-y
-    max-width="290px"
-    min-width="290px"
+    max-width="280px"
+    min-width="280px"
   >
-    <template v-slot:activator="{ on }">
+    <template #activator="{ props }">
       <v-text-field
         v-model="formattedDatetime"
-        prepend-icon="event"
+        prepend-icon="mdi-calendar"
         :label="label"
         readonly
-        v-on="on"
+        v-bind="props"
       />
     </template>
-    <v-card>
-      <v-card-text class="px-0 py-0">
-        <v-tabs fixed-tabs v-model="activeTab">
-          <v-tab key="calendar">
-            <slot name="dateIcon">
-              <v-icon>event</v-icon>
-            </slot>
-          </v-tab>
-          <v-tab key="timer" :disabled="dateSelected">
-            <slot name="timeIcon">
-              <v-icon>access_time</v-icon>
-            </slot>
-          </v-tab>
-          <v-tab-item key="calendar">
-            <v-date-picker v-model="date" @input="showTimePicker" full-width></v-date-picker>
-          </v-tab-item>
-          <v-tab-item key="timer">
-            <v-time-picker v-model="time" full-width></v-time-picker>
-          </v-tab-item>
-        </v-tabs>
-      </v-card-text>
-      <v-card-actions>
-        <v-spacer></v-spacer>
-        <slot name="actions" :parent="this">
-          <v-btn color="grey lighten-1" text @click.native="clearHandler">Clear</v-btn>
-          <v-btn text @click="okHandler">Ok</v-btn>
-        </slot>
-      </v-card-actions>
-    </v-card>
+    <precise-date-time-picker v-model="selectedDatetime" :timezone="timezone" @ok="okHandler" />
   </v-menu>
 </template>
 <script>
-import { parse, parseISO } from "date-fns"
-import { format } from "date-fns-tz"
-
-const DEFAULT_DATE = ""
-const DEFAULT_TIME = "00:00:00"
-const DEFAULT_DATE_FORMAT = "yyyy-MM-dd"
-const DEFAULT_TIME_FORMAT = "HH:mm:ss"
+import { parseISO } from "date-fns"
+import { formatInTimeZone, format } from "date-fns-tz"
+import moment from "moment-timezone"
+import PreciseDateTimePicker from "@/components/PreciseDateTimePicker.vue"
 
 export default {
-  name: "DatetimeTimePickerMenu",
+  name: "DateTimePickerMenu",
 
-  model: {
-    prop: "datetime",
-    event: "input",
-  },
+  inheritAttrs: false,
 
   props: {
-    datetime: {
+    modelValue: {
       type: [Date, String],
       default: null,
     },
@@ -75,93 +38,80 @@ export default {
       type: String,
       default: "",
     },
-    dateFormat: {
+    timezone: {
       type: String,
-      default: DEFAULT_DATE_FORMAT,
+      default: null,
     },
-    timeFormat: {
-      type: String,
-      default: "HH:mm",
-    },
+  },
+
+  components: {
+    PreciseDateTimePicker,
   },
 
   data() {
     return {
       display: false,
-      activeTab: 0,
-      date: DEFAULT_DATE,
-      time: DEFAULT_TIME,
+      selectedDatetime: null,
     }
   },
+
   mounted() {
     this.init()
   },
 
   computed: {
-    dateTimeFormat() {
-      return this.dateFormat + " " + this.timeFormat
-    },
-    defaultDateTimeFormat() {
-      return DEFAULT_DATE_FORMAT + " " + DEFAULT_TIME_FORMAT
-    },
     formattedDatetime() {
-      return this.selectedDatetime ? format(this.selectedDatetime, this.dateTimeFormat) : ""
-    },
-    selectedDatetime() {
-      if (this.date && this.time) {
-        let datetimeString = this.date + " " + this.time
-        if (this.time.length === 5) {
-          datetimeString += ":00"
-        }
-        return parse(datetimeString, this.defaultDateTimeFormat, new Date())
-      } else {
-        return null
-      }
-    },
-    dateSelected() {
-      return !this.date
+      return this.selectedDatetime
+        ? format(parseISO(this.selectedDatetime), "yyyy-MM-dd HH:mm:ss.SSS")
+        : ""
     },
   },
+
   methods: {
     init() {
-      if (!this.datetime) {
+      if (!this.modelValue) {
         return
       }
       let initDateTime
 
-      if (this.datetime instanceof Date) {
-        initDateTime = this.datetime
-      } else if (typeof this.datetime === "string" || this.datetime instanceof String) {
-        initDateTime = parseISO(this.datetime)
+      if (this.modelValue instanceof Date) {
+        initDateTime = this.modelValue
+      } else if (typeof this.modelValue === "string") {
+        initDateTime = parseISO(this.modelValue)
       }
-      this.date = format(initDateTime, DEFAULT_DATE_FORMAT)
-      this.time = format(initDateTime, DEFAULT_TIME_FORMAT)
+
+      this.selectedDatetime = formatInTimeZone(
+        initDateTime,
+        this.timezone,
+        "yyyy-MM-dd'T'HH:mm:ss.SSS"
+      )
     },
     okHandler() {
       this.resetPicker()
-      let isoString = this.selectedDatetime.toISOString()
-      this.$emit("input", isoString)
+      let newValue = moment.tz(this.selectedDatetime, this.timezone).toISOString()
+      this.$emit("update:modelValue", newValue)
     },
     clearHandler() {
       this.resetPicker()
-      this.date = DEFAULT_DATE
-      this.time = DEFAULT_TIME
-      this.$emit("input", null)
+      this.$emit("update:modelValue", null)
     },
     resetPicker() {
       this.display = false
-      this.activeTab = 0
-      if (this.$refs.timer) {
-        this.$refs.timer.selectingHour = true
-      }
     },
     showTimePicker() {
       this.activeTab = 1
     },
   },
   watch: {
-    datetime: function () {
+    modelValue() {
       this.init()
+    },
+    timezone() {
+      this.selectedDatetime = formatInTimeZone(
+        parseISO(this.modelValue),
+        this.timezone,
+        "yyyy-MM-dd'T'HH:mm:ss.SSS"
+      )
     },
   },
 }

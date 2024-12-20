@@ -1,42 +1,36 @@
 <template>
   <v-select
-    v-model="incident_priorities"
+    v-model="selectedPriority"
     :items="items"
-    item-text="name"
+    item-title="name"
+    :item-props="(item) => ({ subtitle: item.description })"
     :menu-props="{ maxHeight: '400' }"
     label="Priority"
     return-object
     :loading="loading"
-  >
-    <template v-slot:item="data">
-      <template>
-        <v-list-item-content>
-          <v-list-item-title v-text="data.item.name" />
-          <v-list-item-subtitle v-text="data.item.description" />
-        </v-list-item-content>
-      </template>
-    </template>
-  </v-select>
+    :error-messages="show_error"
+    :rules="[is_priority_in_project]"
+  />
 </template>
 
 <script>
-import { cloneDeep } from "lodash"
-
 import SearchUtils from "@/search/utils"
 import IncidentPriorityApi from "@/incident/priority/api"
 
 export default {
   name: "IncidentPrioritySelect",
   props: {
-    value: {
+    modelValue: {
       type: Object,
-      default: function () {
-        return {}
-      },
+      default: () => ({}),
     },
     project: {
-      type: [Object],
+      type: Object,
       default: null,
+    },
+    status: {
+      type: String,
+      default: "",
     },
   },
 
@@ -44,24 +38,57 @@ export default {
     return {
       loading: false,
       items: [],
+      error: null,
+      lastProjectId: null,
+      is_priority_in_project: () => {
+        this.validatePriority()
+        return this.error
+      },
     }
   },
 
   computed: {
-    incident_priorities: {
+    selectedPriority: {
       get() {
-        return cloneDeep(this.value)
+        if (!this.modelValue) return null
+        if (this.modelValue.id) {
+          return this.items.find((item) => item.id === this.modelValue.id) || null
+        }
+        // If we only have a name (e.g., from URL params), find by name
+        if (this.modelValue.name) {
+          return this.items.find((item) => item.name === this.modelValue.name) || null
+        }
+        return null
       },
       set(value) {
-        this.$emit("input", value)
+        this.$emit("update:modelValue", value)
+        this.validatePriority()
       },
+    },
+    show_error() {
+      if (!this.project) return null
+      const stablePriority = this.project.stable_priority
+      if (!stablePriority) return null
+      if (this.status == "Stable" && this.selectedPriority?.name != stablePriority.name) {
+        return `Priority must be ${stablePriority.name} for Stable incidents`
+      }
+      return null
     },
   },
 
   methods: {
+    validatePriority() {
+      const project_id = this.project?.id || 0
+      const in_project = this.selectedPriority?.project?.id == project_id
+      if (in_project) {
+        this.error = true
+      } else {
+        this.error = "Only priorities in selected project are allowed"
+      }
+    },
     fetchData() {
       this.error = null
-      this.loading = "error"
+      this.loading = true
 
       let filterOptions = {
         sortBy: ["view_order"],
@@ -88,6 +115,7 @@ export default {
 
       filterOptions = SearchUtils.createParametersFromTableOptions(
         { ...filterOptions },
+        "IncidentPriority",
         enabledFilter
       )
 
@@ -96,16 +124,23 @@ export default {
         this.loading = false
       })
     },
+    resetSelection() {
+      this.$emit("update:modelValue", null)
+    },
+  },
+
+  watch: {
+    project() {
+      this.validatePriority()
+      this.fetchData()
+    },
+    status() {
+      this.validatePriority()
+    },
   },
 
   created() {
     this.fetchData()
-    this.$watch(
-      (vm) => [vm.project],
-      () => {
-        this.fetchData()
-      }
-    )
   },
 }
 </script>

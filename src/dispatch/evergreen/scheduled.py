@@ -4,6 +4,7 @@
     :copyright: (c) 2019 by Netflix Inc., see AUTHORS for more
     :license: Apache, see LICENSE for more details.
 """
+
 import logging
 
 from collections import defaultdict
@@ -12,7 +13,7 @@ from schedule import every
 from typing import Any
 
 from dispatch.database.core import SessionLocal
-from dispatch.decorators import scheduled_project_task
+from dispatch.decorators import scheduled_project_task, timer
 from dispatch.document import service as document_service
 from dispatch.messaging.strings import EVERGREEN_REMINDER
 from dispatch.notification import service as notification_service
@@ -30,11 +31,19 @@ def create_evergreen_reminder(
     db_session: SessionLocal, project: Project, owner_email: str, resource_groups: Any
 ):
     """Contains the logic for evergreen reminders."""
+    if not owner_email:
+        log.warning(
+            "Evergreen reminder not sent. No owner email. Project: {project.name}. Organization: {project.organization.name}"
+        )
+        return
+
     plugin = plugin_service.get_active_instance(
         db_session=db_session, plugin_type="email", project_id=project.id
     )
     if not plugin:
-        log.warning("Evergreen reminder not sent. No email plugin enabled.")
+        log.warning(
+            "Evergreen reminder not sent. No email plugin enabled. Project: {project.name}. Organization: {project.organization.name}"
+        )
         return
 
     items = []
@@ -75,7 +84,7 @@ def create_evergreen_reminder(
         return
 
     # we set the evergreen last reminder at time to now
-    for resource_type, resources in resource_groups.items():
+    for _, resources in resource_groups.items():
         for resource in resources:
             resource.evergreen_last_reminder_at = datetime.utcnow()
 
@@ -90,7 +99,8 @@ def group_items_by_owner_and_type(items):
     return grouped
 
 
-@scheduler.add(every().monday.at("18:00"), name="evergreen-reminder")
+@scheduler.add(every().monday.at("18:00"), name="create-evergreen-reminders")
+@timer
 @scheduled_project_task
 def create_evergreen_reminders(db_session: SessionLocal, project: Project):
     """Sends reminders for items that have evergreen enabled."""

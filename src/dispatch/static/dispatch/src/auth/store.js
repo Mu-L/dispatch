@@ -12,8 +12,11 @@ const getDefaultSelectedState = () => {
     loading: false,
     projects: null,
     role: null,
+    password: null,
   }
 }
+
+const avatarTemplate = import.meta.env.VITE_DISPATCH_AVATAR_TEMPLATE
 
 const state = {
   currentUser: {
@@ -22,13 +25,14 @@ const state = {
     email: "",
     projects: [],
     role: null,
+    experimental_features: false,
   },
   selected: {
     ...getDefaultSelectedState(),
   },
   loading: false,
   dialogs: {
-    showEdit: false,
+    showCreateEdit: false,
   },
   table: {
     rows: {
@@ -38,7 +42,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["email"],
       descending: [true],
     },
@@ -54,21 +58,23 @@ const actions = {
       commit("SET_TABLE_ROWS", response.data)
     })
   }, 500),
-  editShow({ commit }, plugin) {
-    commit("SET_DIALOG_EDIT", true)
+  createEditShow({ commit }, plugin) {
+    commit("SET_DIALOG_CREATE_EDIT", true)
     if (plugin) {
       commit("SET_SELECTED", plugin)
     }
   },
-  closeEdit({ commit }) {
-    commit("SET_DIALOG_EDIT", false)
+  closeCreateEdit({ commit }) {
+    commit("SET_DIALOG_CREATE_EDIT", false)
     commit("RESET_SELECTED")
   },
   save({ commit, dispatch }) {
+    commit("SET_SELECTED_LOADING", true)
     if (!state.selected.id) {
       return UserApi.create(state.selected).then(() => {
-        dispatch("closeEdit")
+        dispatch("closeCreateEdit")
         dispatch("getAll")
+        commit("SET_SELECTED_LOADING", false)
         commit(
           "notification_backend/addBeNotification",
           { text: "User created successfully.", type: "success" },
@@ -78,8 +84,9 @@ const actions = {
     } else {
       return UserApi.update(state.selected.id, state.selected).then(() => {
         commit("SET_USER_PROJECTS", state.selected.projects)
-        dispatch("closeEdit")
+        dispatch("closeCreateEdit")
         dispatch("getAll")
+        commit("SET_SELECTED_LOADING", false)
         commit(
           "notification_backend/addBeNotification",
           { text: "User updated successfully.", type: "success" },
@@ -142,6 +149,15 @@ const actions = {
     commit("SET_USER_LOGOUT")
     router.go()
   },
+  getExperimentalFeatures({ commit }) {
+    UserApi.getUserInfo()
+      .then((response) => {
+        commit("SET_EXPERIMENTAL_FEATURES", response.data.experimental_features)
+      })
+      .catch((error) => {
+        console.error("Error occurred while updating experimental features: ", error)
+      })
+  },
   createExpirationCheck({ state, commit }) {
     // expiration time minus 10 min
     let expire_at = subMinutes(fromUnixTime(state.currentUser.exp), 10)
@@ -162,14 +178,17 @@ const mutations = {
   SET_SELECTED(state, value) {
     state.selected = Object.assign(state.selected, value)
   },
+  SET_SELECTED_LOADING(state, value) {
+    state.selected.loading = value
+  },
   SET_TABLE_LOADING(state, value) {
     state.table.loading = value
   },
   SET_TABLE_ROWS(state, value) {
     state.table.rows = value
   },
-  SET_DIALOG_EDIT(state, value) {
-    state.dialogs.showEdit = value
+  SET_DIALOG_CREATE_EDIT(state, value) {
+    state.dialogs.showCreateEdit = value
   },
   RESET_SELECTED(state) {
     state.selected = Object.assign(state.selected, getDefaultSelectedState())
@@ -186,6 +205,9 @@ const mutations = {
     }
     localStorage.setItem("token", token)
   },
+  SET_EXPERIMENTAL_FEATURES(state, value) {
+    state.currentUser.experimental_features = value
+  },
   SET_USER_LOGOUT(state) {
     state.currentUser = { loggedIn: false }
   },
@@ -196,9 +218,16 @@ const mutations = {
 
 const getters = {
   getField,
-  userAvatarURL: (state) => {
-    if (state.currentUser.userId) {
-      return `${window.location.protocol}//${window.location.host}/avatar/${state.currentUser.userId}/${state.currentUser.userId}.json`
+  userAvatarUrl: (state) => {
+    if (!avatarTemplate) return ""
+    const email = state.currentUser.email || ""
+    const userId = email.split("@")[0]
+    if (userId) {
+      // to use avatar template, store in .env file and
+      // put * as a placeholder for the userid
+      const stem = avatarTemplate.replace("*", userId)
+      const loc = `${window.location.protocol}//${window.location.host}${stem}`
+      return loc
     }
   },
 }

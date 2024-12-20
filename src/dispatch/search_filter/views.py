@@ -1,21 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic.error_wrappers import ErrorWrapper, ValidationError
-from sqlalchemy.orm import Session
+
 from sqlalchemy.exc import IntegrityError
 
-from dispatch.database.core import get_db
-from dispatch.database.service import common_parameters, search_filter_sort_paginate
+from dispatch.auth.permissions import PermissionsDependency
+from dispatch.auth.service import CurrentUser
+from dispatch.database.core import DbSession
+from dispatch.database.service import CommonParameters, search_filter_sort_paginate
 from dispatch.exceptions import ExistsError
 from dispatch.models import PrimaryKey
-from dispatch.auth.models import DispatchUser
-from dispatch.auth.service import get_current_user
 
 from .models import (
     SearchFilterCreate,
-    SearchFilterUpdate,
-    SearchFilterRead,
     SearchFilterPagination,
+    SearchFilterRead,
+    SearchFilterUpdate,
 )
+from .permissions import SearchFilterEditDeletePermission
 from .service import create, delete, get, update
 
 
@@ -23,17 +24,16 @@ router = APIRouter()
 
 
 @router.get("", response_model=SearchFilterPagination)
-def get_filters(*, common: dict = Depends(common_parameters)):
+def get_filters(common: CommonParameters):
     """Retrieve filters."""
     return search_filter_sort_paginate(model="SearchFilter", **common)
 
 
 @router.post("", response_model=SearchFilterRead)
 def create_search_filter(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     search_filter_in: SearchFilterCreate,
-    current_user: DispatchUser = Depends(get_current_user),
+    current_user: CurrentUser,
 ):
     """Create a new filter."""
     try:
@@ -48,13 +48,16 @@ def create_search_filter(
                 )
             ],
             model=SearchFilterRead,
-        )
+        ) from None
 
 
-@router.put("/{search_filter_id}", response_model=SearchFilterRead)
+@router.put(
+    "/{search_filter_id}",
+    response_model=SearchFilterRead,
+    dependencies=[Depends(PermissionsDependency([SearchFilterEditDeletePermission]))],
+)
 def update_search_filter(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     search_filter_id: PrimaryKey,
     search_filter_in: SearchFilterUpdate,
 ):
@@ -77,12 +80,16 @@ def update_search_filter(
                 )
             ],
             model=SearchFilterUpdate,
-        )
+        ) from None
     return search_filter
 
 
-@router.delete("/{search_filter_id}", response_model=None)
-def delete_filter(*, db_session: Session = Depends(get_db), search_filter_id: PrimaryKey):
+@router.delete(
+    "/{search_filter_id}",
+    response_model=None,
+    dependencies=[Depends(PermissionsDependency([SearchFilterEditDeletePermission]))],
+)
+def delete_filter(db_session: DbSession, search_filter_id: PrimaryKey):
     """Delete a search filter."""
     search_filter = get(db_session=db_session, search_filter_id=search_filter_id)
     if not search_filter:

@@ -1,5 +1,5 @@
 <template>
-  <v-card :loading="loading" outlined elevation="0">
+  <v-card :loading="loading">
     <v-card-title>Top 5 Cost</v-card-title>
     <v-data-table
       :headers="headers"
@@ -8,14 +8,15 @@
       hide-default-footer
       disable-filtering
     >
-      <template v-slot:item.name="{ item }">
+      <template #item.name="{ item }">
         <router-link
           :to="{
             name: 'SourceDetail',
             params: { name: item.name, tab: 'details' },
           }"
-          ><b>{{ item.name }}</b></router-link
         >
+          <b>{{ item.name }}</b>
+        </router-link>
       </template>
     </v-data-table>
   </v-card>
@@ -27,7 +28,7 @@ export default {
   name: "SourceTop5CostTableCard",
 
   props: {
-    value: {
+    modelValue: {
       type: Array,
       default: function () {
         return []
@@ -41,25 +42,23 @@ export default {
     },
   },
 
-  components: {},
-
   data() {
     return {
       headers: [
         {
-          text: "Name",
+          title: "Name",
           align: "start",
           sortable: true,
-          value: "name",
+          key: "name",
         },
-        { text: "Cost", value: "cost" },
+        { title: "Cost", key: "cost" },
       ],
     }
   },
 
   computed: {
     sources() {
-      return sortBy(this.value, ["cost"]).slice(0, 5)
+      return sortBy(this.modelValue, ["cost"]).slice(0, 5)
     },
   },
 }

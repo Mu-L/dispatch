@@ -1,27 +1,27 @@
 <template>
   <div>
-    <v-card elevation="0">
+    <v-card>
       <v-card-title>
         <v-text-field
           v-model="search"
-          append-icon="mdi-magnify"
+          append-inner-icon="mdi-magnify"
           label="Search"
           single-line
           hide-details
           clearable
-        ></v-text-field>
+        />
       </v-card-title>
     </v-card>
     <v-data-table :headers="headers" :items="items" :loading="loading" :search="search">
-      <template v-slot:item.project.name="{ item }">
-        <v-chip small :color="item.project.color" text-color="white">
-          {{ item.project.name }}
+      <template #item.project.display_name="{ item, value }">
+        <v-chip size="small" :color="item.project.color">
+          {{ value }}
         </v-chip>
       </template>
-      <template v-slot:item.data-table-actions="{ item }">
-        <v-menu bottom left>
-          <template v-slot:activator="{ on }">
-            <v-btn icon v-on="on">
+      <template #item.data-table-actions="{ item }">
+        <v-menu location="right" origin="overlap">
+          <template #activator="{ props }">
+            <v-btn icon variant="text" v-bind="props">
               <v-icon>mdi-dots-vertical</v-icon>
             </v-btn>
           </template>
@@ -43,10 +43,10 @@ export default {
     return {
       search: "",
       headers: [
-        { text: "Name", value: "name", align: "left", width: "10%" },
-        { text: "Title", value: "title", sortable: false },
-        { text: "Project", value: "project.name", sortable: true },
-        { text: "", value: "data-table-actions", sortable: false, align: "end" },
+        { title: "Name", key: "name", align: "left", width: "10%" },
+        { title: "Title", key: "title", sortable: false },
+        { title: "Project", key: "project.display_name", sortable: true },
+        { title: "", key: "data-table-actions", sortable: false, align: "end" },
       ],
     }
   },

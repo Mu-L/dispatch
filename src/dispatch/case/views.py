@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import Annotated, List
 
 import json
 
@@ -7,28 +7,27 @@ from starlette.requests import Request
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 # NOTE: define permissions before enabling the code block below
-# from dispatch.auth.permissions import (
-#     CaseEditPermission,
-#     CaseJoinPermission,
-#     PermissionsDependency,
-#     CaseViewPermission,
-# )
-from dispatch.auth import service as auth_service
-from dispatch.auth.models import DispatchUser
+from dispatch.auth.permissions import (
+    CaseEditPermission,
+    CaseJoinPermission,
+    PermissionsDependency,
+    CaseViewPermission,
+)
+from dispatch.auth.service import CurrentUser
 from dispatch.case.enums import CaseStatus
 from dispatch.common.utils.views import create_pydantic_include
-from dispatch.database.core import get_db
-from dispatch.database.service import common_parameters, search_filter_sort_paginate
+from dispatch.database.core import DbSession
+from dispatch.database.service import CommonParameters, search_filter_sort_paginate
 from dispatch.models import OrganizationSlug, PrimaryKey
 from dispatch.incident.models import IncidentCreate, IncidentRead
 from dispatch.incident import service as incident_service
-from dispatch.participant.models import ParticipantUpdate
+from dispatch.participant.models import ParticipantUpdate, ParticipantRead, ParticipantReadMinimal
 from dispatch.individual.models import IndividualContactRead
 
 from .flows import (
+    case_add_or_reactivate_participant_flow,
     case_closed_create_flow,
     case_delete_flow,
     case_escalated_create_flow,
@@ -36,9 +35,12 @@ from .flows import (
     case_new_create_flow,
     case_triage_create_flow,
     case_update_flow,
+    case_create_conversation_flow,
+    case_create_resources_flow,
+    get_case_participants_flow,
 )
-from .models import Case, CaseCreate, CasePagination, CaseRead, CaseUpdate
-from .service import create, delete, get, update
+from .models import Case, CaseCreate, CasePagination, CaseRead, CaseUpdate, CaseExpandedPagination
+from .service import create, delete, get, update, get_participants
 
 
 log = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def get_current_case(*, db_session: Session = Depends(get_db), request: Request) -> Case:
+def get_current_case(db_session: DbSession, request: Request) -> Case:
     """Fetches a case or returns an HTTP 404."""
     case = get(db_session=db_session, case_id=request.path_params["case_id"])
     if not case:
@@ -57,29 +59,69 @@ def get_current_case(*, db_session: Session = Depends(get_db), request: Request)
     return case
 
 
+CurrentCase = Annotated[Case, Depends(get_current_case)]
+
+
 @router.get(
     "/{case_id}",
     response_model=CaseRead,
     summary="Retrieves a single case.",
+    dependencies=[Depends(PermissionsDependency([CaseViewPermission]))],
 )
 def get_case(
-    *,
     case_id: PrimaryKey,
-    db_session: Session = Depends(get_db),
-    current_case: Case = Depends(get_current_case),
+    db_session: DbSession,
+    current_case: CurrentCase,
 ):
     """Retrieves the details of a single case."""
     return current_case
 
 
+@router.get(
+    "/{case_id}/participants/minimal",
+    response_model=List[ParticipantReadMinimal],
+    summary="Retrieves a minimal list of case participants.",
+    dependencies=[Depends(PermissionsDependency([CaseViewPermission]))],
+)
+def get_case_participants_minimal(
+    case_id: PrimaryKey,
+    db_session: DbSession,
+):
+    """Retrieves the details of a single case."""
+    return get_participants(case_id=case_id, db_session=db_session)
+
+
+@router.get(
+    "/{case_id}/participants",
+    summary="Retrieves a list of case participants.",
+    dependencies=[Depends(PermissionsDependency([CaseViewPermission]))],
+)
+def get_case_participants(
+    case_id: PrimaryKey,
+    db_session: DbSession,
+    minimal: bool = Query(default=False),
+):
+    """Retrieves the details of a single case."""
+    participants = get_participants(case_id=case_id, db_session=db_session, minimal=minimal)
+
+    if minimal:
+        return [ParticipantReadMinimal.from_orm(p) for p in participants]
+    else:
+        return [ParticipantRead.from_orm(p) for p in participants]
+
+
 @router.get("", summary="Retrieves a list of cases.")
 def get_cases(
-    *,
-    common: dict = Depends(common_parameters),
+    common: CommonParameters,
     include: List[str] = Query([], alias="include[]"),
+    expand: bool = Query(default=False),
 ):
     """Retrieves all cases."""
+    common["include_keys"] = include
     pagination = search_filter_sort_paginate(model="Case", **common)
+
+    if expand:
+        return json.loads(CaseExpandedPagination(**pagination).json())
 
     if include:
         # only allow two levels for now
@@ -97,15 +139,27 @@ def get_cases(
 
 @router.post("", response_model=CaseRead, summary="Creates a new case.")
 def create_case(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     organization: OrganizationSlug,
     case_in: CaseCreate,
-    current_user: DispatchUser = Depends(auth_service.get_current_user),
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Creates a new case."""
-    case = create(db_session=db_session, case_in=case_in, current_user=current_user)
+    # TODO: (wshel) this conditional always happens in the UI flow since
+    # reporter is not available to be set.
+    if not case_in.reporter:
+        case_in.reporter = ParticipantUpdate(
+            individual=IndividualContactRead(email=current_user.email)
+        )
+
+    try:
+        case = create(db_session=db_session, case_in=case_in, current_user=current_user)
+    except ValueError as e:
+        log.exception(e)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=[{"msg": e.args[0]}]
+        ) from e
 
     if case.status == CaseStatus.triage:
         background_tasks.add_task(
@@ -129,29 +183,95 @@ def create_case(
         background_tasks.add_task(
             case_new_create_flow,
             case_id=case.id,
+            db_session=db_session,
             organization_slug=organization,
         )
 
     return case
 
 
+@router.post(
+    "/{case_id}/resources/conversation",
+    response_model=CaseRead,
+    summary="Creates conversation channel for an existing case.",
+)
+def create_case_channel(
+    db_session: DbSession,
+    current_case: CurrentCase,
+):
+    """Creates conversation channel for an existing case."""
+
+    current_case.dedicated_channel = True
+
+    # Add all case participants to the case channel
+    case_create_conversation_flow(
+        db_session=db_session,
+        case=current_case,
+        participant_emails=current_case.participant_emails,
+        conversation_target=None,
+    )
+
+    return current_case
+
+
+@router.post(
+    "/{case_id}/resources",
+    response_model=CaseRead,
+    summary="Creates resources for an existing case.",
+)
+def create_case_resources(
+    db_session: DbSession,
+    case_id: PrimaryKey,
+    current_case: CurrentCase,
+    background_tasks: BackgroundTasks,
+):
+    """Creates resources for an existing case."""
+    individual_participants, team_participants = get_case_participants_flow(
+        case=current_case, db_session=db_session
+    )
+    background_tasks.add_task(
+        case_create_resources_flow,
+        db_session=db_session,
+        case_id=case_id,
+        individual_participants=individual_participants,
+        team_participants=team_participants,
+    )
+
+    return current_case
+
+
 @router.put(
     "/{case_id}",
     response_model=CaseRead,
     summary="Updates an existing case.",
-    # dependencies=[Depends(PermissionsDependency([CaseEditPermission]))],
+    dependencies=[Depends(PermissionsDependency([CaseEditPermission]))],
 )
 def update_case(
-    *,
-    db_session: Session = Depends(get_db),
-    current_case: Case = Depends(get_current_case),
+    db_session: DbSession,
+    current_case: CurrentCase,
     organization: OrganizationSlug,
     case_id: PrimaryKey,
     case_in: CaseUpdate,
-    current_user: DispatchUser = Depends(auth_service.get_current_user),
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Updates an existing case."""
+    reporter_email = None
+    if case_in.reporter:
+        # we assign the case to the reporter provided
+        reporter_email = case_in.reporter.individual.email
+    elif current_user:
+        # we fall back to assign the case to the current user
+        reporter_email = current_user.email
+
+    assignee_email = None
+    if case_in.assignee:
+        # we assign the case to the assignee provided
+        assignee_email = case_in.assignee.individual.email
+    elif current_user:
+        # we fall back to assign the case to the current user
+        assignee_email = current_user.email
+
     # we store the previous state of the case in order to be able to detect changes
     previous_case = CaseRead.from_orm(current_case)
 
@@ -165,7 +285,8 @@ def update_case(
         case_update_flow,
         case_id=case_id,
         previous_case=previous_case,
-        user_email=current_user.email,
+        reporter_email=reporter_email,
+        assignee_email=assignee_email,
         organization_slug=organization,
     )
 
@@ -176,22 +297,25 @@ def update_case(
     "/{case_id}/escalate",
     response_model=IncidentRead,
     summary="Escalates an existing case.",
-    # dependencies=[Depends(PermissionsDependency([CaseEditPermission]))],
+    dependencies=[Depends(PermissionsDependency([CaseEditPermission]))],
 )
 def escalate_case(
-    *,
-    db_session: Session = Depends(get_db),
-    current_case: Case = Depends(get_current_case),
+    db_session: DbSession,
+    current_case: CurrentCase,
     organization: OrganizationSlug,
     incident_in: IncidentCreate,
-    current_user: DispatchUser = Depends(auth_service.get_current_user),
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Escalates an existing case."""
-    # current user is better than assignee (although likely the same)
+    # use existing reporter or current user if not provided
     if not incident_in.reporter:
-        incident_in.reporter = ParticipantUpdate(
-            individual=IndividualContactRead(email=current_user.email)
+        incident_in.reporter = (
+            ParticipantUpdate(
+                individual=IndividualContactRead(email=current_case.reporter.individual.email)
+            )
+            if current_case.reporter
+            else ParticipantUpdate(individual=IndividualContactRead(email=current_user.email))
         )
 
     # allow for default values
@@ -217,22 +341,17 @@ def escalate_case(
 @router.delete(
     "/{case_id}",
     response_model=None,
-    summary="Deletes an existing case.",
-    # dependencies=[Depends(PermissionsDependency([CaseEditPermission]))],
+    summary="Deletes an existing case and its external resources.",
+    dependencies=[Depends(PermissionsDependency([CaseEditPermission]))],
 )
 def delete_case(
-    *,
-    db_session: Session = Depends(get_db),
-    organization: OrganizationSlug,
     case_id: PrimaryKey,
-    background_tasks: BackgroundTasks,
+    db_session: DbSession,
+    current_case: CurrentCase,
 ):
-    """Deletes an existing case."""
-    # we get the internal case
-    case = get(db_session=db_session, case_id=case_id)
-
+    """Deletes an existing case and its external resources."""
     # we run the case delete flow
-    case_delete_flow(case=case, db_session=db_session)
+    case_delete_flow(case=current_case, db_session=db_session)
 
     # we delete the internal case
     try:
@@ -244,9 +363,31 @@ def delete_case(
             detail=[
                 {
                     "msg": (
-                        f"Case {case.name} could not be deleted. Make sure the case has no "
+                        f"Case {current_case.name} could not be deleted. Make sure the case has no "
                         "relationships to other cases or incidents before deleting it.",
                     )
                 }
             ],
-        )
+        ) from None
+
+
+@router.post(
+    "/{case_id}/join",
+    summary="Adds an individual to a case.",
+    dependencies=[Depends(PermissionsDependency([CaseJoinPermission]))],
+)
+def join_case(
+    db_session: DbSession,
+    organization: OrganizationSlug,
+    case_id: PrimaryKey,
+    current_case: CurrentCase,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
+):
+    """Adds an individual to a case."""
+    background_tasks.add_task(
+        case_add_or_reactivate_participant_flow,
+        current_user.email,
+        case_id=current_case.id,
+        organization_slug=organization,
+    )

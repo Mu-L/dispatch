@@ -1,9 +1,10 @@
+from collections import Counter, defaultdict
 from datetime import datetime
-from collections import defaultdict
-from typing import List, Optional, Any, ForwardRef
+from typing import Any, ForwardRef, List, Optional
 
-from pydantic import validator
+from pydantic import Field, validator
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -13,32 +14,46 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import relationship
-from sqlalchemy_utils import TSVectorType
+from sqlalchemy_utils import TSVectorType, observes
 
-from dispatch.auth.models import UserRead
-from dispatch.case.priority.models import (
-    CasePriorityRead,
-    CasePriorityBase,
+from dispatch.case.priority.models import CasePriorityBase, CasePriorityCreate, CasePriorityRead
+from dispatch.case.severity.models import CaseSeverityBase, CaseSeverityCreate, CaseSeverityRead
+from dispatch.case.type.models import CaseTypeBase, CaseTypeCreate, CaseTypeRead
+from dispatch.case_cost.models import (
+    CaseCostRead,
+    CaseCostUpdate,
 )
-from dispatch.case.severity.models import CaseSeverityBase, CaseSeverityRead
-from dispatch.case.type.models import CaseTypeBase, CaseTypeRead
+from dispatch.conversation.models import ConversationRead
 from dispatch.database.core import Base
 from dispatch.document.models import Document, DocumentRead
+from dispatch.entity.models import EntityRead
 from dispatch.enums import Visibility
 from dispatch.event.models import EventRead
 from dispatch.group.models import Group, GroupRead
-from dispatch.incident.models import IncidentReadMinimal
 from dispatch.messaging.strings import CASE_RESOLUTION_DEFAULT
-from dispatch.models import DispatchBase, ProjectMixin, TimeStampMixin
-from dispatch.models import NameStr, PrimaryKey
+from dispatch.models import (
+    DispatchBase,
+    NameStr,
+    Pagination,
+    PrimaryKey,
+    ProjectMixin,
+    TimeStampMixin,
+)
+from dispatch.participant.models import (
+    Participant,
+    ParticipantRead,
+    ParticipantReadMinimal,
+    ParticipantUpdate,
+)
 from dispatch.storage.models import StorageRead
 from dispatch.tag.models import TagRead
 from dispatch.ticket.models import TicketRead
 from dispatch.workflow.models import WorkflowInstanceRead
 
-from .enums import CaseStatus
-
+from .enums import CaseResolutionReason, CaseStatus
 
 # Assoc table for case and tags
 assoc_case_tags = Table(
@@ -67,13 +82,17 @@ class Case(Base, TimeStampMixin, ProjectMixin):
     title = Column(String, nullable=False)
     description = Column(String, nullable=False)
     resolution = Column(String, default=CASE_RESOLUTION_DEFAULT, nullable=False)
+    resolution_reason = Column(String)
     status = Column(String, default=CaseStatus.new, nullable=False)
     visibility = Column(String, default=Visibility.open, nullable=False)
-
+    participants_team = Column(String)
+    participants_location = Column(String)
     reported_at = Column(DateTime, default=datetime.utcnow)
     triage_at = Column(DateTime)
     escalated_at = Column(DateTime)
     closed_at = Column(DateTime)
+    dedicated_channel = Column(Boolean, default=False)
+    genai_analysis = Column(JSONB, default={}, nullable=False, server_default="{}")
 
     search_vector = Column(
         TSVectorType(
@@ -82,8 +101,11 @@ class Case(Base, TimeStampMixin, ProjectMixin):
     )
 
     # relationships
-    assignee_id = Column(Integer, ForeignKey("dispatch_core.dispatch_user.id"))
-    assignee = relationship("DispatchUser", foreign_keys=[assignee_id], post_update=True)
+    assignee_id = Column(Integer, ForeignKey("participant.id", ondelete="CASCADE"))
+    assignee = relationship(Participant, foreign_keys=[assignee_id], post_update=True)
+
+    reporter_id = Column(Integer, ForeignKey("participant.id", ondelete="CASCADE"))
+    reporter = relationship(Participant, foreign_keys=[reporter_id], post_update=True)
 
     case_type = relationship("CaseType", backref="case")
     case_type_id = Column(Integer, ForeignKey("case_type.id"))
@@ -105,8 +127,17 @@ class Case(Base, TimeStampMixin, ProjectMixin):
 
     events = relationship("Event", backref="case", cascade="all, delete-orphan")
 
+    feedback = relationship("Feedback", backref="case", cascade="all, delete-orphan")
+
     groups = relationship(
         "Group", backref="case", cascade="all, delete-orphan", foreign_keys=[Group.case_id]
+    )
+
+    participants = relationship(
+        Participant,
+        backref="case",
+        cascade="all, delete-orphan",
+        foreign_keys=[Participant.case_id],
     )
 
     incidents = relationship("Incident", secondary=assoc_cases_incidents, backref="cases")
@@ -125,6 +156,8 @@ class Case(Base, TimeStampMixin, ProjectMixin):
     related_id = Column(Integer, ForeignKey("case.id"))
     related = relationship("Case", remote_side=[id], uselist=True, foreign_keys=[related_id])
 
+    signal_thread_ts = Column(String, nullable=True)
+
     storage = relationship("Storage", uselist=False, backref="case", cascade="all, delete-orphan")
 
     tags = relationship(
@@ -135,6 +168,44 @@ class Case(Base, TimeStampMixin, ProjectMixin):
 
     ticket = relationship("Ticket", uselist=False, backref="case", cascade="all, delete-orphan")
 
+    # resources
+    case_costs = relationship(
+        "CaseCost",
+        backref="case",
+        cascade="all, delete-orphan",
+        lazy="subquery",
+        order_by="CaseCost.created_at",
+    )
+
+    @observes("participants")
+    def participant_observer(self, participants):
+        self.participants_team = Counter(p.team for p in participants).most_common(1)[0][0]
+        self.participants_location = Counter(p.location for p in participants).most_common(1)[0][0]
+
+    @property
+    def has_channel(self) -> bool:
+        if not self.conversation:
+            return False
+        return True if not self.conversation.thread_id else False
+
+    @property
+    def has_thread(self) -> bool:
+        if not self.conversation:
+            return False
+        return True if self.conversation.thread_id else False
+
+    @property
+    def participant_emails(self) -> list:
+        return [participant.individual.email for participant in self.participants]
+
+    @hybrid_property
+    def total_cost(self):
+        total_cost = 0
+        if self.case_costs:
+            for cost in self.case_costs:
+                total_cost += cost.amount
+        return total_cost
+
 
 class SignalRead(DispatchBase):
     id: PrimaryKey
@@ -144,20 +215,23 @@ class SignalRead(DispatchBase):
     variant: Optional[str]
     external_id: str
     external_url: Optional[str]
+    workflow_instances: Optional[List[WorkflowInstanceRead]] = []
 
 
 class SignalInstanceRead(DispatchBase):
+    created_at: datetime
+    entities: Optional[List[EntityRead]] = []
+    raw: Any
     signal: SignalRead
     tags: Optional[List[TagRead]] = []
-    raw: Any
-    fingerprint: str
-    created_at: datetime
 
 
 class ProjectRead(DispatchBase):
     id: Optional[PrimaryKey]
     name: NameStr
+    display_name: Optional[str]
     color: Optional[str]
+    allow_self_join: Optional[bool] = Field(True, nullable=True)
 
 
 # Pydantic models...
@@ -165,6 +239,7 @@ class CaseBase(DispatchBase):
     title: str
     description: Optional[str]
     resolution: Optional[str]
+    resolution_reason: Optional[CaseResolutionReason]
     status: Optional[CaseStatus]
     visibility: Optional[Visibility]
 
@@ -182,12 +257,24 @@ class CaseBase(DispatchBase):
 
 
 class CaseCreate(CaseBase):
-    assignee: Optional[UserRead]
-    case_priority: Optional[CasePriorityRead]
-    case_severity: Optional[CaseSeverityRead]
-    case_type: Optional[CaseTypeRead]
+    assignee: Optional[ParticipantUpdate]
+    case_priority: Optional[CasePriorityCreate]
+    case_severity: Optional[CaseSeverityCreate]
+    case_type: Optional[CaseTypeCreate]
+    dedicated_channel: Optional[bool]
     project: Optional[ProjectRead]
+    reporter: Optional[ParticipantUpdate]
     tags: Optional[List[TagRead]] = []
+
+
+class CaseReadBasic(DispatchBase):
+    id: PrimaryKey
+    name: Optional[NameStr]
+
+
+class IncidentReadBasic(DispatchBase):
+    id: PrimaryKey
+    name: Optional[NameStr]
 
 
 CaseReadMinimal = ForwardRef("CaseReadMinimal")
@@ -195,19 +282,25 @@ CaseReadMinimal = ForwardRef("CaseReadMinimal")
 
 class CaseReadMinimal(CaseBase):
     id: PrimaryKey
-    assignee: Optional[UserRead]
+    assignee: Optional[ParticipantReadMinimal]
+    case_costs: List[CaseCostRead] = []
     case_priority: CasePriorityRead
     case_severity: CaseSeverityRead
     case_type: CaseTypeRead
-    duplicates: Optional[List[CaseReadMinimal]] = []
-    incidents: Optional[List[IncidentReadMinimal]] = []
+    duplicates: Optional[List[CaseReadBasic]] = []
+    incidents: Optional[List[IncidentReadBasic]] = []
     related: Optional[List[CaseReadMinimal]] = []
     closed_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     escalated_at: Optional[datetime] = None
+    dedicated_channel: Optional[bool]
     name: Optional[NameStr]
     project: ProjectRead
+    reporter: Optional[ParticipantReadMinimal]
     reported_at: Optional[datetime] = None
+    tags: Optional[List[TagRead]] = []
+    ticket: Optional[TicketRead] = None
+    total_cost: float | None
     triage_at: Optional[datetime] = None
 
 
@@ -216,39 +309,49 @@ CaseReadMinimal.update_forward_refs()
 
 class CaseRead(CaseBase):
     id: PrimaryKey
-    assignee: Optional[UserRead]
+    assignee: Optional[ParticipantRead]
+    case_costs: List[CaseCostRead] = []
     case_priority: CasePriorityRead
     case_severity: CaseSeverityRead
     case_type: CaseTypeRead
     closed_at: Optional[datetime] = None
+    conversation: Optional[ConversationRead] = None
     created_at: Optional[datetime] = None
     documents: Optional[List[DocumentRead]] = []
-    duplicates: Optional[List[CaseReadMinimal]] = []
+    duplicates: Optional[List[CaseReadBasic]] = []
     escalated_at: Optional[datetime] = None
     events: Optional[List[EventRead]] = []
+    genai_analysis: Optional[dict[str, Any]] = {}
     groups: Optional[List[GroupRead]] = []
-    incidents: Optional[List[IncidentReadMinimal]] = []
+    incidents: Optional[List[IncidentReadBasic]] = []
     name: Optional[NameStr]
+    participants: Optional[List[ParticipantRead]] = []
     project: ProjectRead
     related: Optional[List[CaseReadMinimal]] = []
     reported_at: Optional[datetime] = None
+    reporter: Optional[ParticipantRead]
     signal_instances: Optional[List[SignalInstanceRead]] = []
     storage: Optional[StorageRead] = None
     tags: Optional[List[TagRead]] = []
     ticket: Optional[TicketRead] = None
+    total_cost: float | None
     triage_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     workflow_instances: Optional[List[WorkflowInstanceRead]] = []
 
 
 class CaseUpdate(CaseBase):
-    assignee: Optional[UserRead]
+    assignee: Optional[ParticipantUpdate]
+    case_costs: List[CaseCostUpdate] = []
     case_priority: Optional[CasePriorityBase]
     case_severity: Optional[CaseSeverityBase]
     case_type: Optional[CaseTypeBase]
-    duplicates: Optional[List[CaseRead]] = []
+    closed_at: Optional[datetime] = None
+    duplicates: Optional[List[CaseReadBasic]] = []
     related: Optional[List[CaseRead]] = []
+    reporter: Optional[ParticipantUpdate]
     escalated_at: Optional[datetime] = None
-    incidents: Optional[List[IncidentReadMinimal]] = []
+    incidents: Optional[List[IncidentReadBasic]] = []
     reported_at: Optional[datetime] = None
     tags: Optional[List[TagRead]] = []
     triage_at: Optional[datetime] = None
@@ -270,8 +373,9 @@ class CaseUpdate(CaseBase):
         return v
 
 
-class CasePagination(DispatchBase):
+class CasePagination(Pagination):
     items: List[CaseReadMinimal] = []
-    itemsPerPage: int
-    page: int
-    total: int
+
+
+class CaseExpandedPagination(Pagination):
+    items: List[CaseRead] = []

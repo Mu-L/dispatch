@@ -1,7 +1,7 @@
 import logging
 import uuid
 from http import HTTPStatus
-from typing import Any, Union
+from typing import Any
 
 from blockkit import Context, MarkdownText, Modal
 from slack_bolt.app import App
@@ -27,6 +27,7 @@ from .middleware import (
     configuration_middleware,
     message_context_middleware,
     user_middleware,
+    select_context_middleware,
 )
 
 app = App(token="xoxb-valid", request_verification_enabled=False, token_verification_enabled=False)
@@ -78,7 +79,16 @@ def app_error_handler(
 
     # the user is in a message flow
     if body.get("response_url"):
-        respond(text=message, response_type="ephemeral", replace_original=False)
+        # the user is in a thread
+        if thread := body.get("container", {}).get("thread_ts"):
+            client.chat_postEphemeral(
+                channel=context["channel_id"],
+                text=message,
+                thread_ts=thread,
+                user=context["user_id"],
+            )
+        else:
+            respond(text=message, response_type="ephemeral", replace_original=False)
 
     if not isinstance(error, DispatchException):
         return BoltResponse(body=body, status=HTTPStatus.INTERNAL_SERVER_ERROR.value)
@@ -119,7 +129,7 @@ def build_and_log_error(
     else:
         guid = str(uuid.uuid4())
         message = build_unexpected_error_message(guid)
-        logger.exception(error, extra=dict(slack_interaction_guid=guid))
+        logger.exception(error, extra={"slack_interaction_guid": guid})
 
     return message
 
@@ -130,12 +140,13 @@ def build_and_log_error(
         message_context_middleware,
         user_middleware,
         configuration_middleware,
+        select_context_middleware,
     ],
 )
 def handle_message_events(
     ack: Ack,
     body: dict,
-    client: Union[WebClient, WebClient],
+    client: WebClient,
     context: BoltContext,
     db_session: Session,
     payload: dict,

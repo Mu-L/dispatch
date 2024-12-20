@@ -11,6 +11,8 @@ from dispatch.case.priority.views import router as case_priority_router
 from dispatch.case.severity.views import router as case_severity_router
 from dispatch.case.type.views import router as case_type_router
 from dispatch.case.views import router as case_router
+from dispatch.case_cost.views import router as case_cost_router
+from dispatch.case_cost_type.views import router as case_cost_type_router
 from dispatch.data.alert.views import router as alert_router
 from dispatch.data.query.views import router as query_router
 from dispatch.data.source.data_format.views import router as source_data_format_router
@@ -21,12 +23,16 @@ from dispatch.data.source.type.views import router as source_type_router
 from dispatch.data.source.views import router as source_router
 from dispatch.definition.views import router as definition_router
 from dispatch.document.views import router as document_router
-from dispatch.feedback.views import router as feedback_router
+from dispatch.entity.views import router as entity_router
+from dispatch.entity_type.views import router as entity_type_router
+from dispatch.feedback.incident.views import router as feedback_router
+from dispatch.feedback.service.views import router as service_feedback_router
 from dispatch.incident.priority.views import router as incident_priority_router
 from dispatch.incident.severity.views import router as incident_severity_router
 from dispatch.incident.type.views import router as incident_type_router
 from dispatch.incident.views import router as incident_router
 from dispatch.incident_cost.views import router as incident_cost_router
+from dispatch.cost_model.views import router as cost_model_router
 from dispatch.incident_cost_type.views import router as incident_cost_type_router
 from dispatch.incident_role.views import router as incident_role_router
 from dispatch.individual.views import router as individual_contact_router
@@ -35,6 +41,9 @@ from dispatch.notification.views import router as notification_router
 from dispatch.organization.views import router as organization_router
 from dispatch.plugin.views import router as plugin_router
 from dispatch.project.views import router as project_router
+from dispatch.forms.views import router as forms_router
+from dispatch.forms.type.views import router as forms_type_router
+from dispatch.email_templates.views import router as email_template_router
 
 
 from dispatch.signal.views import router as signal_router
@@ -124,12 +133,18 @@ authenticated_organization_api_router.include_router(
 )
 
 authenticated_organization_api_router.include_router(
-    signal_router, prefix="/signals", tags="signals"
+    signal_router, prefix="/signals", tags=["signals"]
 )
 
 authenticated_organization_api_router.include_router(user_router, prefix="/users", tags=["users"])
 authenticated_organization_api_router.include_router(
     document_router, prefix="/documents", tags=["documents"]
+)
+authenticated_organization_api_router.include_router(
+    entity_router, prefix="/entity", tags=["entities"]
+)
+authenticated_organization_api_router.include_router(
+    entity_type_router, prefix="/entity_type", tags=["entity_types"]
 )
 authenticated_organization_api_router.include_router(tag_router, prefix="/tags", tags=["tags"])
 authenticated_organization_api_router.include_router(
@@ -187,6 +202,21 @@ authenticated_organization_api_router.include_router(
     tags=["case_severities"],
 )
 authenticated_organization_api_router.include_router(
+    case_cost_router,
+    prefix="/case_costs",
+    tags=["case_costs"],
+)
+authenticated_organization_api_router.include_router(
+    case_cost_type_router,
+    prefix="/case_cost_types",
+    tags=["case_cost_types"],
+)
+authenticated_organization_api_router.include_router(
+    cost_model_router,
+    prefix="/cost_models",
+    tags=["cost_models"],
+)
+authenticated_organization_api_router.include_router(
     workflow_router, prefix="/workflows", tags=["workflows"]
 )
 authenticated_organization_api_router.include_router(
@@ -194,6 +224,9 @@ authenticated_organization_api_router.include_router(
 )
 authenticated_organization_api_router.include_router(
     feedback_router, prefix="/feedback", tags=["feedback"]
+)
+authenticated_organization_api_router.include_router(
+    service_feedback_router, prefix="/service_feedback", tags=["service_feedback"]
 )
 authenticated_organization_api_router.include_router(
     notification_router, prefix="/notifications", tags=["notifications"]
@@ -208,6 +241,13 @@ authenticated_organization_api_router.include_router(
 )
 authenticated_organization_api_router.include_router(
     incident_role_router, prefix="/incident_roles", tags=["role"]
+)
+authenticated_organization_api_router.include_router(forms_router, prefix="/forms", tags=["forms"])
+authenticated_organization_api_router.include_router(
+    forms_type_router, prefix="/forms_type", tags=["forms_type"]
+)
+authenticated_organization_api_router.include_router(
+    email_template_router, prefix="/email_template", tags=["email_template"]
 )
 
 

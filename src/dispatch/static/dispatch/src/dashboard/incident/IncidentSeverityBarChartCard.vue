@@ -19,7 +19,7 @@ export default {
   name: "IncidentSeverityBarChartCard",
 
   props: {
-    value: {
+    modelValue: {
       type: Object,
       default: function () {
         return {}
@@ -44,7 +44,10 @@ export default {
   },
 
   created: function () {
-    IncidentSeverityApi.getAll().then((response) => {
+    let filterOptions = {
+      itemsPerPage: -1,
+    }
+    IncidentSeverityApi.getAll(filterOptions).then((response) => {
       this.severities = [
         ...new Set(
           map(
@@ -110,14 +113,14 @@ export default {
     },
     series() {
       let series = DashboardUtils.createCountedSeriesData(
-        this.value,
+        this.modelValue,
         "incident_severity.name",
         this.severities
       )
       return series
     },
     categoryData() {
-      return Object.keys(this.value)
+      return Object.keys(this.modelValue)
     },
   },
 }

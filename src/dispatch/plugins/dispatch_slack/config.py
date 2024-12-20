@@ -3,6 +3,9 @@ from pydantic import Field, SecretStr
 from dispatch.config import BaseConfigurationModel
 
 
+MAX_SECTION_TEXT_LENGTH = 2999
+
+
 class SlackConfiguration(BaseConfigurationModel):
     """Slack configuration description."""
 
@@ -73,6 +76,11 @@ class SlackConversationConfiguration(SlackConfiguration):
         title="List Participants Command String",
         description="Defines the string used to list all incident participants. Must match what is defined in Slack.",
     )
+    slack_command_list_signals: str = Field(
+        "/dispatch-list-signals",
+        title="List Signals Command String",
+        description="Defines the string used to list all signals for the conversation where the command was ran. Must match what is defined in Slack.",
+    )
     slack_command_assign_role: str = Field(
         "/dispatch-assign-role",
         title="Assign Role Command String",
@@ -93,10 +101,20 @@ class SlackConversationConfiguration(SlackConfiguration):
         title="Engage Oncall Command String",
         description="Defines the string used to engage an oncall. Must match what is defined in Slack.",
     )
-    slack_command_list_resources: str = Field(
-        "/dispatch-list-resources",
-        title="List Resources Command String",
-        description="Defines the string used to list incident resources. Must match what is defined in Slack.",
+    slack_command_create_case: str = Field(
+        "/dispatch-create-case",
+        title="Create Case Command String",
+        description="Defines the string used to create a case. Must match what is defined in Slack.",
+    )
+    slack_command_update_case: str = Field(
+        "/dispatch-update-case",
+        title="Update Case Command String",
+        description="Defines the string used to update a case. Must match what is defined in Slack.",
+    )
+    slack_command_escalate_case: str = Field(
+        "/dispatch-escalate-case",
+        title="Escalates a case to an incident",
+        description="Only works from within a channel based Case.",
     )
     slack_command_report_incident: str = Field(
         "/dispatch-report-incident",
@@ -137,4 +155,14 @@ class SlackConversationConfiguration(SlackConfiguration):
         "/dispatch-list-workflows",
         title="List Workflows Command String",
         description="Defines the string used to list all available workflows. Must match what is defined in Slack",
+    )
+    slack_command_create_task: str = Field(
+        "/dispatch-create-task",
+        title="Create Task Command String",
+        description="Defines the string used to create a task. Must match what is defined in Slack.",
+    )
+    slack_command_engage_user: str = Field(
+        "/dispatch-engage-user",
+        title="Engage User Command String",
+        description="Defines the string used to engage a user via MFA prompt. Must match what is defined in Slack.",
     )

@@ -14,6 +14,7 @@ const getDefaultSelectedState = () => {
     id: null,
     filters: [],
     project: null,
+    tags: [],
     evergreen: null,
     evergreen_owner: null,
     evergreen_reminder_interval: null,
@@ -54,7 +55,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["name"],
       descending: [false],
       filters: {

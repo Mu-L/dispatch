@@ -7,8 +7,8 @@ jobs:
   enforce-label:
     runs-on: ubuntu-latest
     steps:
-      - uses: yogevbd/enforce-label-action@2.1.0
+      - uses: yogevbd/enforce-label-action@2.2.2
         with:
-          REQUIRED_LABELS_ANY: "bug,enhancement,documentation,feature,dependencies,skip-changelog"
-          REQUIRED_LABELS_ANY_DESCRIPTION: "Select at least one label ['bug','documentation','feature','dependencies','enhancement','skip-changelog','tests']"
+          REQUIRED_LABELS_ANY: "bug,dependencies,documentation,enhancement,feature,skip-changelog,techdebt,tests"
+          REQUIRED_LABELS_ANY_DESCRIPTION: "Select at least one label from the following list: bug, dependencies, documentation, enhancement, feature, skip-changelog, techdebt, tests"
           BANNED_LABELS: "banned"

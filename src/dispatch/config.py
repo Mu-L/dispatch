@@ -110,6 +110,17 @@ MJML_PATH = config(
     "MJML_PATH",
     default=f"{os.path.dirname(os.path.realpath(__file__))}/static/dispatch/node_modules/.bin",
 )
+DISPATCH_MARKDOWN_IN_INCIDENT_DESC = config(
+    "DISPATCH_MARKDOWN_IN_INCIDENT_DESC", cast=bool, default=False
+)
+DISPATCH_ESCAPE_HTML = config("DISPATCH_ESCAPE_HTML", cast=bool, default=None)
+if DISPATCH_ESCAPE_HTML and DISPATCH_MARKDOWN_IN_INCIDENT_DESC:
+    log.warning(
+        "HTML escape and Markdown are both explicitly enabled, this may cause unexpected notification markup."
+    )
+elif DISPATCH_ESCAPE_HTML is None and DISPATCH_MARKDOWN_IN_INCIDENT_DESC:
+    log.info("Disabling HTML escaping, due to Markdown was enabled explicitly.")
+    DISPATCH_ESCAPE_HTML = False
 
 DISPATCH_JWT_AUDIENCE = config("DISPATCH_JWT_AUDIENCE", default=None)
 DISPATCH_JWT_EMAIL_OVERRIDE = config("DISPATCH_JWT_EMAIL_OVERRIDE", default=None)
@@ -146,6 +157,16 @@ if DISPATCH_AUTHENTICATION_PROVIDER_SLUG == "dispatch-auth-provider-pkce":
 
 DISPATCH_AUTHENTICATION_PROVIDER_HEADER_NAME = config(
     "DISPATCH_AUTHENTICATION_PROVIDER_HEADER_NAME", default="remote-user"
+)
+
+DISPATCH_AUTHENTICATION_PROVIDER_AWS_ALB_ARN = config(
+    "DISPATCH_AUTHENTICATION_PROVIDER_AWS_ALB_ARN", default=None
+)
+DISPATCH_AUTHENTICATION_PROVIDER_AWS_ALB_EMAIL_CLAIM = config(
+    "DISPATCH_AUTHENTICATION_PROVIDER_AWS_ALB_EMAIL_CLAIM", default="email"
+)
+DISPATCH_AUTHENTICATION_PROVIDER_AWS_ALB_PUBLIC_KEY_CACHE_SECONDS = config(
+    "DISPATCH_AUTHENTICATION_PROVIDER_AWS_ALB_PUBLIC_KEY_CACHE_SECONDS", cast=int, default=300
 )
 
 # sentry middleware
@@ -192,6 +213,9 @@ DATABASE_NAME = config("DATABASE_NAME", default="dispatch")
 DATABASE_PORT = config("DATABASE_PORT", default="5432")
 DATABASE_ENGINE_POOL_SIZE = config("DATABASE_ENGINE_POOL_SIZE", cast=int, default=20)
 DATABASE_ENGINE_MAX_OVERFLOW = config("DATABASE_ENGINE_MAX_OVERFLOW", cast=int, default=0)
+# Deal with DB disconnects
+# https://docs.sqlalchemy.org/en/20/core/pooling.html#pool-disconnects
+DATABASE_ENGINE_POOL_PING = config("DATABASE_ENGINE_POOL_PING", default=False)
 SQLALCHEMY_DATABASE_URI = f"postgresql+psycopg2://{_DATABASE_CREDENTIAL_USER}:{_QUOTED_DATABASE_PASSWORD}@{DATABASE_HOSTNAME}:{DATABASE_PORT}/{DATABASE_NAME}"
 
 ALEMBIC_CORE_REVISION_PATH = config(

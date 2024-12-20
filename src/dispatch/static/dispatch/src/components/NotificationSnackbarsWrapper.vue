@@ -3,12 +3,9 @@
     v-model="notification.show"
     :timeout="notification.timeout"
     :color="notification.type"
-    @input="setSeen(notification.index)"
+    @update:model-value="setSeen(notification.index)"
   >
-    {{ notification.text }}
-    <template v-slot:action="{ attrs }">
-      <v-btn text v-bind="attrs" @click="setSeen(notification.index)"> Close </v-btn>
-    </template>
+    <span class="text-center">{{ notification.text }}</span>
   </v-snackbar>
 </template>
 
@@ -93,3 +90,11 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+.text-center {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+</style>

@@ -1,18 +1,16 @@
 from typing import Optional
 from datetime import datetime, timedelta
 
-import validators
-
 from pydantic.fields import Field
-from pydantic.networks import EmailStr
-from pydantic import BaseModel, validator
+from pydantic.networks import EmailStr, AnyHttpUrl
+from pydantic import BaseModel
 from pydantic.types import conint, constr, SecretStr
 
-from sqlalchemy import func
-from sqlalchemy.orm import relationship
-from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, event, ForeignKey
+from sqlalchemy import func
+from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import relationship
 
 # pydantic type that limits the range of primary keys
 PrimaryKey = conint(gt=0, lt=2147483647)
@@ -92,8 +90,15 @@ class EvergreenMixin(object):
     def overdue(cls):
         return (
             func.date_part("day", func.now() - cls.evergreen_last_reminder_at)
-            >= cls.evergreen_reminder_interval
+            >= cls.evergreen_reminder_interval  # noqa
         )
+
+
+class FeedbackMixin(object):
+    """Feedback mixin."""
+
+    rating = Column(String)
+    feedback = Column(String)
 
 
 # Pydantic models...
@@ -106,9 +111,19 @@ class DispatchBase(BaseModel):
 
         json_encoders = {
             # custom output conversion for datetime
-            datetime: lambda v: v.strftime("%Y-%m-%dT%H:%M:%SZ") if v else None,
+            datetime: lambda v: v.strftime("%Y-%m-%dT%H:%M:%S.%fZ") if v else None,
             SecretStr: lambda v: v.get_secret_value() if v else None,
         }
+
+
+class Pagination(DispatchBase):
+    itemsPerPage: int
+    page: int
+    total: int
+
+
+class PrimaryKeyModel(BaseModel):
+    id: PrimaryKey
 
 
 class EvergreenBase(DispatchBase):
@@ -121,7 +136,7 @@ class EvergreenBase(DispatchBase):
 class ResourceBase(DispatchBase):
     resource_type: Optional[str] = Field(None, nullable=True)
     resource_id: Optional[str] = Field(None, nullable=True)
-    weblink: Optional[str] = Field(None, nullable=True)
+    weblink: Optional[AnyHttpUrl] = Field(None, nullable=True)
 
 
 class ContactBase(DispatchBase):

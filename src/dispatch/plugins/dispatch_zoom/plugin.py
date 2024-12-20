@@ -1,10 +1,11 @@
 """
 .. module: dispatch.plugins.dispatch_zoom.plugin
     :platform: Unix
-    :copyright: (c) 2019 by HashiCorp Inc., see AUTHORS for more
+    :copyright: (c) 2019 by HashCorp Inc., see AUTHORS for more
     :license: Apache, see LICENSE for more details.
 .. moduleauthor:: Will Bengtson <wbengtson@hashicorp.com>
 """
+
 import logging
 import random
 from typing import List
@@ -59,14 +60,14 @@ class ZoomConferencePlugin(ConferencePlugin):
     description = "Uses Zoom to manage conference meetings."
     version = zoom_plugin.__version__
 
-    author = "HashiCorp"
+    author = "HashCorp"
     author_url = "https://github.com/netflix/dispatch.git"
 
     def __init__(self):
         self.configuration_schema = ZoomConfiguration
 
     def create(
-        self, name: str, description: str = None, title: str = None, participants: List[str] = []
+        self, name: str, description: str = None, title: str = None, participants: List[str] = None
     ):
         """Create a new event."""
         client = ZoomClient(

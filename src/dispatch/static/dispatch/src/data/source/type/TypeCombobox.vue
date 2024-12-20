@@ -3,46 +3,38 @@
     :items="items"
     :label="label"
     :loading="loading"
-    :search-input.sync="search"
-    @update:search-input="getFilteredData()"
+    v-model:search="search"
+    @update:search="getFilteredData()"
     chips
     clearable
-    deletable-chips
+    closable-chips
     hide-selected
-    item-text="name"
+    item-title="name"
     item-value="id"
     multiple
     no-filter
     v-model="types"
   >
-    <template v-slot:no-data>
+    <template #no-data>
       <v-list-item>
-        <v-list-item-content>
-          <v-list-item-title>
-            No Projects matching "
-            <strong>{{ search }}</strong
-            >".
-          </v-list-item-title>
-        </v-list-item-content>
+        <v-list-item-title>
+          No Projects matching "
+          <strong>{{ search }}</strong
+          >".
+        </v-list-item-title>
       </v-list-item>
     </template>
-    <template v-slot:item="data">
-      <template>
-        <v-list-item-content>
-          <v-list-item-title v-text="data.item.name" />
-          <v-list-item-subtitle
-            style="width: 200px"
-            class="text-truncate"
-            v-text="data.item.description"
-          />
-        </v-list-item-content>
-      </template>
+    <template #item="data">
+      <v-list-item v-bind="data.props" :title="null">
+        <v-list-item-title>{{ data.item.raw.name }}</v-list-item-title>
+        <v-list-item-subtitle :title="data.item.raw.description">
+          {{ data.item.raw.description }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
-    <template v-slot:append-item>
+    <template #append-item>
       <v-list-item v-if="more" @click="loadMore()">
-        <v-list-item-content>
-          <v-list-item-subtitle> Load More </v-list-item-subtitle>
-        </v-list-item-content>
+        <v-list-item-subtitle> Load More </v-list-item-subtitle>
       </v-list-item>
     </template>
   </v-combobox>
@@ -57,7 +49,7 @@ import TypeApi from "@/data/source/type/api"
 export default {
   name: "SourceTypeComboBox",
   props: {
-    value: {
+    modelValue: {
       type: Array,
       default: function () {
         return []
@@ -84,7 +76,7 @@ export default {
   computed: {
     types: {
       get() {
-        return cloneDeep(this.value)
+        return cloneDeep(this.modelValue)
       },
       set(value) {
         this.search = null
@@ -94,7 +86,7 @@ export default {
           }
           return true
         })
-        this.$emit("input", _types)
+        this.$emit("update:modelValue", _types)
       },
     },
   },

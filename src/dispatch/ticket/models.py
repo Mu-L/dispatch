@@ -6,13 +6,14 @@ from sqlalchemy import Column, Integer, ForeignKey
 
 from dispatch.database.core import Base
 from dispatch.messaging.strings import TICKET_DESCRIPTION
-from dispatch.models import ResourceBase, ResourceMixin, PrimaryKey
+from dispatch.models import ResourceBase, ResourceMixin
 
 
 class Ticket(Base, ResourceMixin):
     id = Column(Integer, primary_key=True)
     incident_id = Column(Integer, ForeignKey("incident.id", ondelete="CASCADE"))
     case_id = Column(Integer, ForeignKey("case.id", ondelete="CASCADE"))
+    task_id = Column(Integer, ForeignKey("task.id", ondelete="CASCADE"))
 
 
 # Pydantic models...

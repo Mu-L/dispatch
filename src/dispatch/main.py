@@ -10,11 +10,14 @@ from fastapi.responses import JSONResponse
 from pydantic.error_wrappers import ValidationError
 
 from sentry_asgi import SentryMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import inspect
 from sqlalchemy.orm import scoped_session
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.routing import compile_path
+from starlette.middleware.gzip import GZipMiddleware
 
 from starlette.responses import Response, StreamingResponse, FileResponse
 from starlette.staticfiles import StaticFiles
@@ -28,6 +31,7 @@ from .database.core import engine, sessionmaker
 from .extensions import configure_extensions
 from .logging import configure_logging
 from .metrics import provider as metric_provider
+from .rate_limiter import limiter
 
 
 log = logging.getLogger(__name__)
@@ -49,9 +53,13 @@ exception_handlers = {404: not_found}
 
 # we create the ASGI for the app
 app = FastAPI(exception_handlers=exception_handlers, openapi_url="")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # we create the ASGI for the frontend
 frontend = FastAPI(openapi_url="")
+frontend.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @frontend.middleware("http")
@@ -72,6 +80,7 @@ api = FastAPI(
     openapi_url="/docs/openapi.json",
     redoc_url="/docs",
 )
+api.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 def get_path_params_from_request(request: Request) -> str:
@@ -109,33 +118,24 @@ async def db_session_middleware(request: Request, call_next):
     path_params = get_path_params_from_request(request)
 
     # if this call is organization specific set the correct search path
-    organization_slug = path_params.get("organization")
-    if organization_slug:
-        request.state.organization = organization_slug
-        schema = f"dispatch_organization_{organization_slug}"
-        # validate slug exists
-        schema_names = inspect(engine).get_schema_names()
-        if schema in schema_names:
-            # add correct schema mapping depending on the request
-            schema_engine = engine.execution_options(
-                schema_translate_map={
-                    None: schema,
-                }
-            )
-        else:
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": [{"msg": f"Unknown database schema name: {schema}"}]},
-            )
-    else:
+    organization_slug = path_params.get("organization", "default")
+    request.state.organization = organization_slug
+    schema = f"dispatch_organization_{organization_slug}"
+    # validate slug exists
+    schema_names = inspect(engine).get_schema_names()
+    if schema in schema_names:
         # add correct schema mapping depending on the request
-        # can we set some default here?
-        request.state.organization = "default"
         schema_engine = engine.execution_options(
             schema_translate_map={
-                None: "dispatch_organization_default",
+                None: schema,
             }
         )
+    else:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": [{"msg": f"Unknown database schema name: {schema}"}]},
+        )
+
     try:
         session = scoped_session(sessionmaker(bind=schema_engine), scopefunc=get_request_id)
         request.state.db = session()
@@ -192,6 +192,12 @@ class ExceptionMiddleware(BaseHTTPMiddleware):
             log.exception(e)
             response = JSONResponse(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": [{"msg": "Unknown", "loc": ["Unknown"], "type": "Unknown"}]},
+            )
+        except Exception as e:
+            log.exception(e)
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"detail": [{"msg": "Unknown", "loc": ["Unknown"], "type": "Unknown"}]},
             )
 

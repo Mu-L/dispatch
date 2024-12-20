@@ -311,9 +311,7 @@ class BuildAssetsCommand(BaseBuildCommand):
         env["DISPATCH_STATIC_DIST_PATH"] = self.dispatch_static_dist_path
         env["NODE_ENV"] = "production"
         # TODO: Our JS builds should not require 4GB heap space
-        env["NODE_OPTIONS"] = (
-            (env.get("NODE_OPTIONS", "") + " --max-old-space-size=4096")
-        ).lstrip()
+        env["NODE_OPTIONS"] = (env.get("NODE_OPTIONS", "") + " --max-old-space-size=4096").lstrip()
         # self._run_npm_command(["webpack", "--bail"], env=env)
 
     def _write_version_file(self, version_info):
@@ -340,7 +338,13 @@ IS_LIGHT_BUILD = os.environ.get("DISPATCH_LIGHT_BUILD") == "1"
 
 def get_requirements(env):
     with open("requirements-{}.txt".format(env)) as fp:
-        return [x.strip() for x in fp.read().split("\n") if not x.startswith("#")]
+        return [
+            x.strip()
+            for x in fp.read().split("\n")
+            if not x.strip().startswith("#")
+            and not x.strip().startswith("--")
+            and not x.strip() == ""
+        ]
 
 
 install_requires = get_requirements("base")
@@ -389,11 +393,11 @@ setup(
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
         "License :: OSI Approved :: Apache",
-        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.11.2",
     ],
     package_dir={"": "src"},
     packages=find_packages("src"),
-    python_requires=">=3.9",
+    python_requires=">=3.11",
     install_requires=install_requires,
     extras_require={"dev": dev_requires},
     cmdclass=cmdclass,
@@ -402,13 +406,18 @@ setup(
     entry_points={
         "console_scripts": ["dispatch = dispatch.cli:entrypoint"],
         "dispatch.plugins": [
+            "dispatch_atlassian_confluence = dispatch.plugins.dispatch_atlassian_confluence.plugin:ConfluencePagePlugin",
+            "dispatch_atlassian_confluence_document = dispatch.plugins.dispatch_atlassian_confluence.docs.plugin:ConfluencePageDocPlugin",
+            "dispatch_aws_sqs = dispatch.plugins.dispatch_aws.plugin:AWSSQSSignalConsumerPlugin",
+            "dispatch_aws_alb_auth = dispatch.plugins.dispatch_core.plugin:AwsAlbAuthProviderPlugin",
+            "dispatch_auth_mfa = dispatch.plugins.dispatch_core.plugin:DispatchMfaPlugin",
             "dispatch_basic_auth = dispatch.plugins.dispatch_core.plugin:BasicAuthProviderPlugin",
             "dispatch_contact = dispatch.plugins.dispatch_core.plugin:DispatchContactPlugin",
-            "dispatch_document_resolver = dispatch.plugins.dispatch_core.plugin:DispatchDocumentResolverPlugin",
+            "dispatch_header_auth = dispatch.plugins.dispatch_core.plugin:HeaderAuthProviderPlugin",
             "dispatch_participant_resolver = dispatch.plugins.dispatch_core.plugin:DispatchParticipantResolverPlugin",
             "dispatch_pkce_auth = dispatch.plugins.dispatch_core.plugin:PKCEAuthProviderPlugin",
-            "dispatch_header_auth = dispatch.plugins.dispatch_core.plugin:HeaderAuthProviderPlugin",
             "dispatch_ticket = dispatch.plugins.dispatch_core.plugin:DispatchTicketPlugin",
+            "duo_auth_mfa = dispatch.plugins.dispatch_duo.plugin:DuoMfaPlugin",
             "generic_workflow = dispatch.plugins.generic_workflow.plugin:GenericWorkflowPlugin",
             "github_monitor = dispatch.plugins.dispatch_github.plugin:GithubMonitorPlugin",
             "google_calendar_conference = dispatch.plugins.dispatch_google.calendar.plugin:GoogleCalendarConferencePlugin",
@@ -418,11 +427,13 @@ setup(
             "google_gmail_email = dispatch.plugins.dispatch_google.gmail.plugin:GoogleGmailEmailPlugin",
             "google_groups_participants = dispatch.plugins.dispatch_google.groups.plugin:GoogleGroupParticipantGroupPlugin",
             "jira_ticket = dispatch.plugins.dispatch_jira.plugin:JiraTicketPlugin",
+            "openai_artificial_intelligence = dispatch.plugins.dispatch_openai.plugin:OpenAIPlugin",
             "opsgenie_oncall = dispatch.plugins.dispatch_opsgenie.plugin:OpsGenieOncallPlugin",
             "pagerduty_oncall = dispatch.plugins.dispatch_pagerduty.plugin:PagerDutyOncallPlugin",
             "slack_contact = dispatch.plugins.dispatch_slack.plugin:SlackContactPlugin",
             "slack_conversation = dispatch.plugins.dispatch_slack.plugin:SlackConversationPlugin",
             "zoom_conference = dispatch.plugins.dispatch_zoom.plugin:ZoomConferencePlugin",
+            "microsoft_teams_conference = dispatch.plugins.dispatch_microsoft_teams.conference.plugin:MicrosoftTeamsConferencePlugin",
         ],
     },
 )

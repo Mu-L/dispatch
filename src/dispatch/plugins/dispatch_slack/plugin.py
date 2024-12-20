@@ -5,49 +5,62 @@
     :license: Apache, see LICENSE for more details.
 .. moduleauthor:: Kevin Glisson <kglisson@netflix.com>
 """
+
+import io
+import json
 import logging
-import os
-import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from blockkit import Message
-from joblib import Memory
+from blockkit.surfaces import Block
+from slack_sdk.errors import SlackApiError
+from sqlalchemy.orm import Session
 
+from dispatch.auth.models import DispatchUser
 from dispatch.case.models import Case
 from dispatch.conversation.enums import ConversationCommands
 from dispatch.decorators import apply, counter, timer
-from dispatch.exceptions import DispatchPluginException
+from dispatch.plugin import service as plugin_service
 from dispatch.plugins import dispatch_slack as slack_plugin
-from dispatch.plugins.bases import ContactPlugin, ConversationPlugin, DocumentPlugin
+from dispatch.plugins.bases import ContactPlugin, ConversationPlugin
 from dispatch.plugins.dispatch_slack.config import (
-    SlackConfiguration,
     SlackContactConfiguration,
     SlackConversationConfiguration,
 )
-from dispatch.plugins.dispatch_slack.endpoints import router as slack_event_router
+from dispatch.signal.enums import SignalEngagementStatus
+from dispatch.signal.models import SignalEngagement, SignalInstance
 
-from .case.messages import create_case_message, create_signal_messages
+from .case.messages import (
+    create_action_buttons_message,
+    create_case_message,
+    create_genai_signal_analysis_message,
+    create_signal_engagement_message,
+    create_signal_message,
+)
 from .endpoints import router as slack_event_router
-
+from .enums import SlackAPIErrorCode
+from .events import ChannelActivityEvent, ThreadActivityEvent
 from .messaging import create_message_blocks
 from .service import (
+    add_conversation_bookmark,
     add_users_to_conversation,
+    add_users_to_conversation_thread,
     archive_conversation,
     chunks,
     conversation_archived,
     create_conversation,
     create_slack_client,
-    get_conversation_by_name,
+    does_user_exist,
+    emails_to_user_ids,
     get_user_avatar_url,
     get_user_info_by_id,
     get_user_profile_by_email,
-    list_conversation_messages,
-    list_conversations,
-    message_filter,
+    is_user,
+    rename_conversation,
     resolve_user,
     send_ephemeral_message,
     send_message,
-    set_conversation_bookmark,
+    set_conversation_description,
     set_conversation_topic,
     unarchive_conversation,
     update_message,
@@ -64,6 +77,7 @@ class SlackConversationPlugin(ConversationPlugin):
     description = "Uses Slack to facilitate conversations."
     version = slack_plugin.__version__
     events = slack_event_router
+    plugin_events = [ChannelActivityEvent, ThreadActivityEvent]
 
     author = "Netflix"
     author_url = "https://github.com/netflix/dispatch.git"
@@ -76,33 +90,162 @@ class SlackConversationPlugin(ConversationPlugin):
         client = create_slack_client(self.configuration)
         return create_conversation(client, name, self.configuration.private_channels)
 
-    def create_threaded(self, case: Case, conversation_id: str):
+    def create_threaded(self, case: Case, conversation_id: str, db_session: Session):
         """Creates a new threaded conversation."""
         client = create_slack_client(self.configuration)
         blocks = create_case_message(case=case, channel_id=conversation_id)
         response = send_message(client=client, conversation_id=conversation_id, blocks=blocks)
-        send_message(
-            client=client,
-            conversation_id=conversation_id,
-            text="All real-time case collaboration should be captured in this thread.",
-            ts=response["timestamp"],
-        )
+        response_timestamp = response["timestamp"]
+
         if case.signal_instances:
-            messages = create_signal_messages(case=case)
-            for m in messages:
+            signal_response = None
+
+            # we try to generate a GenAI signal analysis message
+            try:
+                message, message_blocks = create_genai_signal_analysis_message(
+                    case=case,
+                    db_session=db_session,
+                )
+                if message and isinstance(message, dict):
+                    # we update the genai_analysis field in the case model with the message if it's a dict
+                    # if the message is a string, it means there was an error generating the analysis
+                    case.genai_analysis = message
+
+                if message_blocks:
+                    signal_response = send_message(
+                        client=client,
+                        conversation_id=conversation_id,
+                        ts=response_timestamp,
+                        blocks=message_blocks,
+                    )
+            except Exception as e:
+                logger.exception(f"Error generating GenAI signal analysis message: {e}")
+
+            case.signal_thread_ts = (
+                signal_response.get("timestamp") if signal_response else response_timestamp
+            )
+
+            # we try to generate a signal message
+            try:
+                message = create_signal_message(
+                    case_id=case.id, channel_id=conversation_id, db_session=db_session
+                )
+                signal_response = send_message(
+                    client=client,
+                    conversation_id=conversation_id,
+                    ts=case.signal_thread_ts,
+                    blocks=message,
+                )
+                if signal_response:
+                    case.signal_thread_ts = signal_response.get("timestamp")
+            except Exception as e:
+                logger.exception(f"Error generating signal message: {e}")
+
+            # we try to upload the alert JSON to the case thread
+            try:
+                client.files_upload(
+                    channels=conversation_id,
+                    thread_ts=case.signal_thread_ts,
+                    filetype="json",
+                    file=io.BytesIO(json.dumps(case.signal_instances[0].raw, indent=4).encode()),
+                )
+            except SlackApiError as e:
+                if e.response["error"] == SlackAPIErrorCode.MISSING_SCOPE:
+                    exception_message = (
+                        "Error uploading alert JSON to the case thread due to a missing scope"
+                    )
+                else:
+                    exception_message = "Error uploading alert JSON to the case thread"
+                logger.exception(f"{exception_message}: {e}")
+
+            except Exception as e:
+                logger.exception(f"Error uploading alert JSON to the case thread: {e}")
+
+            # we try to generate action buttons
+            try:
+                message = create_action_buttons_message(
+                    case=case, channel_id=conversation_id, db_session=db_session
+                )
                 send_message(
                     client=client,
                     conversation_id=conversation_id,
-                    ts=response["timestamp"],
-                    blocks=m,
+                    ts=case.signal_thread_ts,
+                    blocks=message,
                 )
+            except Exception as e:
+                logger.exception(f"Error generating action buttons message: {e}")
+
+            db_session.commit()
         return response
+
+    def create_engagement_threaded(
+        self,
+        case: Case,
+        conversation_id: str,
+        thread_id: str,
+        user: DispatchUser,
+        engagement: SignalEngagement,
+        signal_instance: SignalInstance,
+        engagement_status: SignalEngagementStatus = SignalEngagementStatus.new,
+    ):
+        """Creates a new engagement message."""
+        client = create_slack_client(self.configuration)
+        if not does_user_exist(client=client, email=user.email):
+            not_found_msg = (
+                f"Unable to engage user: {user.email}. User not found in the Slack workspace."
+            )
+            return send_message(
+                client=client,
+                conversation_id=conversation_id,
+                text=not_found_msg,
+                ts=thread_id,
+            )
+
+        blocks = create_signal_engagement_message(
+            case=case,
+            channel_id=conversation_id,
+            user_email=user.email,
+            engagement=engagement,
+            signal_instance=signal_instance,
+            engagement_status=engagement_status,
+        )
+        return send_message(
+            client=client,
+            conversation_id=conversation_id,
+            blocks=blocks,
+            ts=thread_id,
+        )
 
     def update_thread(self, case: Case, conversation_id: str, ts: str):
         """Updates an existing threaded conversation."""
         client = create_slack_client(self.configuration)
         blocks = create_case_message(case=case, channel_id=conversation_id)
         return update_message(client=client, conversation_id=conversation_id, ts=ts, blocks=blocks)
+
+    def update_signal_message(
+        self,
+        case_id: int,
+        conversation_id: str,
+        db_session: Session,
+        thread_id: str,
+    ):
+        """Updates the signal message."""
+        client = create_slack_client(self.configuration)
+        blocks = create_signal_message(
+            case_id=case_id, channel_id=conversation_id, db_session=db_session
+        )
+        return update_message(
+            client=client, conversation_id=conversation_id, blocks=blocks, ts=thread_id
+        )
+
+    def send_message(self, conversation_id: str, blocks: list[Block]):
+        """Updates an existing threaded conversation."""
+        client = create_slack_client(self.configuration)
+        return send_message(
+            client=client,
+            conversation_id=conversation_id,
+            blocks=blocks,
+        )
 
     def send(
         self,
@@ -117,26 +260,35 @@ class SlackConversationPlugin(ConversationPlugin):
         **kwargs,
     ):
         """Sends a new message based on data and type."""
-        client = create_slack_client(self.configuration)
-        messages = []
-        if not blocks:
-            blocks = create_message_blocks(message_template, notification_type, items, **kwargs)
+        try:
+            client = create_slack_client(self.configuration)
+            messages = []
+            if not blocks:
+                blocks = create_message_blocks(message_template, notification_type, items, **kwargs)
 
-            for c in chunks(blocks, 50):
-                messages.append(
-                    send_message(
-                        client,
-                        conversation_id,
-                        text,
-                        ts,
-                        Message(blocks=c).build()["blocks"],
-                        persist,
+                for c in chunks(blocks, 50):
+                    messages.append(
+                        send_message(
+                            client,
+                            conversation_id,
+                            text,
+                            ts,
+                            Message(blocks=c).build()["blocks"],
+                            persist,
+                        )
                     )
-                )
-        else:
-            for c in chunks(blocks, 50):
-                messages.append(send_message(client, conversation_id, text, ts, c, persist))
-        return messages
+            else:
+                for c in chunks(blocks, 50):
+                    messages.append(send_message(client, conversation_id, text, ts, c, persist))
+            return messages
+        except SlackApiError as exception:
+            error = exception.response["error"]
+            if error == SlackAPIErrorCode.IS_ARCHIVED:
+                # swallow send errors if the channel is archived
+                message = f"SlackAPIError trying to send: {exception.response}. Message: {text}. Type: {notification_type}. Template: {message_template}"
+                logger.error(message)
+            else:
+                raise exception
 
     def send_direct(
         self,
@@ -149,8 +301,10 @@ class SlackConversationPlugin(ConversationPlugin):
         blocks: Optional[List] = None,
         **kwargs,
     ):
-        """Sends a message directly to a user."""
+        """Sends a message directly to a user if the user exists."""
         client = create_slack_client(self.configuration)
+        if not does_user_exist(client, user):
+            return {}
         user_id = resolve_user(client, user)["id"]
 
         if not blocks:
@@ -171,8 +325,10 @@ class SlackConversationPlugin(ConversationPlugin):
         blocks: Optional[List] = None,
         **kwargs,
     ):
-        """Sends an ephemeral message to a user in a channel."""
+        """Sends an ephemeral message to a user in a channel if the user exists."""
         client = create_slack_client(self.configuration)
+        if not does_user_exist(client, user):
+            return {}
         user_id = resolve_user(client, user)["id"]
 
         if not blocks:
@@ -185,23 +341,36 @@ class SlackConversationPlugin(ConversationPlugin):
             send_ephemeral_message(client, conversation_id, user_id, text, blocks)
 
     def add(self, conversation_id: str, participants: List[str]):
-        """Adds users to conversation."""
+        """Adds users to conversation if it is not archived."""
         client = create_slack_client(self.configuration)
-        participants = [resolve_user(client, p)["id"] for p in participants]
+        archived = conversation_archived(client, conversation_id)
+        if not archived:
+            participants = [resolve_user(client, p)["id"] for p in set(participants)]
+            add_users_to_conversation(client, conversation_id, participants)
+
+    def add_to_thread(self, conversation_id: str, thread_id: str, participants: List[str]):
+        """Adds users to a thread conversation."""
+        client = create_slack_client(self.configuration)
+        user_ids = emails_to_user_ids(client=client, participants=participants)
+        add_users_to_conversation_thread(client, conversation_id, thread_id, user_ids)
+
+    def archive(self, conversation_id: str):
+        """Archives a conversation."""
+        client = create_slack_client(self.configuration)
 
         archived = conversation_archived(client, conversation_id)
         if not archived:
-            add_users_to_conversation(client, conversation_id, participants)
-
-    def archive(self, conversation_id: str):
-        """Archives conversation."""
-        client = create_slack_client(self.configuration)
-        return archive_conversation(client, conversation_id)
+            archive_conversation(client, conversation_id)
 
     def unarchive(self, conversation_id: str):
-        """Unarchives conversation."""
+        """Unarchives a conversation."""
         client = create_slack_client(self.configuration)
         return unarchive_conversation(client, conversation_id)
+
+    def rename(self, conversation_id: str, name: str):
+        """Renames a conversation."""
+        client = create_slack_client(self.configuration)
+        return rename_conversation(client, conversation_id, name)
 
     def get_participant_avatar_url(self, participant_id: str):
         """Gets the participant's avatar url."""
@@ -213,10 +382,15 @@ class SlackConversationPlugin(ConversationPlugin):
         client = create_slack_client(self.configuration)
         return set_conversation_topic(client, conversation_id, topic)
 
-    def set_bookmark(self, conversation_id: str, weblink: str, title: str):
-        """Sets the conversation bookmark."""
+    def set_description(self, conversation_id: str, description: str):
+        """Sets the conversation description."""
         client = create_slack_client(self.configuration)
-        return set_conversation_bookmark(client, conversation_id, weblink, title)
+        return set_conversation_description(client, conversation_id, description)
+
+    def add_bookmark(self, conversation_id: str, weblink: str, title: str):
+        """Adds a bookmark to the conversation."""
+        client = create_slack_client(self.configuration)
+        return add_conversation_bookmark(client, conversation_id, weblink, title)
 
     def get_command_name(self, command: str):
         """Gets the command name."""
@@ -226,11 +400,79 @@ class SlackConversationPlugin(ConversationPlugin):
             ConversationCommands.engage_oncall: self.configuration.slack_command_engage_oncall,
             ConversationCommands.executive_report: self.configuration.slack_command_report_executive,
             ConversationCommands.list_participants: self.configuration.slack_command_list_participants,
-            ConversationCommands.list_resources: self.configuration.slack_command_list_resources,
             ConversationCommands.list_tasks: self.configuration.slack_command_list_tasks,
             ConversationCommands.tactical_report: self.configuration.slack_command_report_tactical,
         }
         return command_mappings.get(command, [])
+
+    def fetch_events(
+        self, db_session: Session, subject: Any, plugin_event_id: int, oldest: str = "0", **kwargs
+    ):
+        """Fetches incident events from the Slack plugin.
+
+        Args:
+            subject: An Incident or Case object.
+            plugin_event_id: The plugin event id.
+            oldest: The oldest timestamp to fetch events from.
+
+        Returns:
+            A sorted list of tuples (utc_dt, user_id).
+        """
+        try:
+            client = create_slack_client(self.configuration)
+            plugin_event = plugin_service.get_plugin_event_by_id(
+                db_session=db_session, plugin_event_id=plugin_event_id
+            )
+            return self.get_event(plugin_event).fetch_activity(client, subject, oldest=oldest)
+        except Exception as e:
+            logger.exception(e)
+            raise e
+
+    def get_conversation_replies(self, conversation_id: str, thread_ts: str) -> list[str]:
+        """
+        Fetches replies from a specific thread in a Slack conversation.
+
+        Args:
+            conversation_id (str): The ID of the Slack conversation.
+            thread_ts (str): The timestamp of the thread to fetch replies from.
+
+        Returns:
+            list[str]: A list of replies from users in the specified thread.
+        """
+        client = create_slack_client(self.configuration)
+        conversation_replies = client.conversations_replies(
+            channel=conversation_id,
+            ts=thread_ts,
+        )["messages"]
+
+        replies = []
+        for reply in conversation_replies:
+            if is_user(config=self.configuration, user_id=reply.get("user")):
+                # we only include messages from users
+                replies.append(f"{reply['text']}")
+        return replies
+
+    def get_all_member_emails(self, conversation_id: str) -> list[str]:
+        """
+        Fetches all members of a Slack conversation.
+
+        Args:
+            conversation_id (str): The ID of the Slack conversation.
+
+        Returns:
+            list[str]: A list of the emails for all members in the conversation.
+        """
+        client = create_slack_client(self.configuration)
+        member_ids = client.conversations_members(channel=conversation_id).get("members", [])
+
+        member_emails = []
+        for member_id in member_ids:
+            if is_user(config=self.configuration, user_id=member_id):
+                user = get_user_info_by_id(client, member_id)
+                if user and (profile := user.get("profile")) and (email := profile.get("email")):
+                    member_emails.append(email)
+
+        return member_emails
 
 
 @apply(counter, exclude=["__init__"])
@@ -268,7 +510,8 @@ class SlackContactPlugin(ContactPlugin):
 
         return {
             "fullname": profile["real_name"],
-            "email": profile["email"],
+            # https://api.slack.com/methods/users.profile.get#email-addresses
+            "email": profile.get("email", email),
             "title": profile["title"],
             "team": team,
             "department": department,
@@ -276,70 +519,3 @@ class SlackContactPlugin(ContactPlugin):
             "weblink": weblink,
             "thumbnail": profile["image_512"],
         }
-
-
-class SlackDocumentPlugin(DocumentPlugin):
-    title = "Slack Plugin - Document Interrogator"
-    slug = "slack-document"
-    description = "Uses Slack as a document source."
-    version = slack_plugin.__version__
-
-    author = "Netflix"
-    author_url = "https://github.com/netflix/dispatch.git"
-
-    def __init__(self):
-        self.configuration_schema = SlackConfiguration
-        self.cachedir = os.path.dirname(os.path.realpath(__file__))
-        self.memory = Memory(cachedir=self.cachedir, verbose=0)
-
-    def get(self, **kwargs) -> dict:
-        """Queries slack for documents."""
-        client = create_slack_client(self.configuration)
-        conversations = []
-
-        if kwargs["channels"]:
-            logger.debug(f"Querying slack for documents. Channels: {kwargs['channels']}")
-
-            channels = kwargs["channels"].split(",")
-            for c in channels:
-                conversations.append(get_conversation_by_name(client, c))
-
-        if kwargs["channel_match_pattern"]:
-            try:
-                regex = kwargs["channel_match_pattern"]
-                pattern = re.compile(regex)
-            except re.error as e:
-                raise DispatchPluginException(
-                    message=f"Invalid regex. Is everything escaped properly? Regex: '{regex}' Message: {e}"
-                )
-
-            logger.debug(
-                f"Querying slack for documents. ChannelsPattern: {kwargs['channel_match_pattern']}"
-            )
-            for c in list_conversations(client):
-                if pattern.match(c["name"]):
-                    conversations.append(c)
-
-        for c in conversations:
-            logger.info(f'Fetching channel messages. Channel Name: {c["name"]}')
-
-            messages = list_conversation_messages(client, c["id"], lookback=kwargs["lookback"])
-
-            logger.info(f'Found {len(messages)} messages in slack. Channel Name: {c["name"]}')
-
-            for m in messages:
-                if not message_filter(m):
-                    continue
-
-                user_email = get_user_info_by_id(client, m["user"])["user"]["profile"]["email"]
-
-                yield {
-                    "person": {"email": user_email},
-                    "doc": {
-                        "text": m["text"],
-                        "is_private": c["is_private"],
-                        "subject": c["name"],
-                        "source": "slack",
-                    },
-                    "ref": {"timestamp": m["ts"]},
-                }

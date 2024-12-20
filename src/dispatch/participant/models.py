@@ -6,7 +6,7 @@ from sqlalchemy import Column, Boolean, String, Integer, ForeignKey, select
 from sqlalchemy.ext.hybrid import hybrid_property
 
 from dispatch.database.core import Base
-from dispatch.models import DispatchBase, PrimaryKey
+from dispatch.models import DispatchBase, PrimaryKey, Pagination
 from dispatch.participant_role.models import (
     ParticipantRoleCreate,
     ParticipantRoleRead,
@@ -34,8 +34,9 @@ class Participant(Base):
     # relationships
     feedback = relationship("Feedback", backref="participant")
     incident_id = Column(Integer, ForeignKey("incident.id", ondelete="CASCADE", use_alter=True))
+    case_id = Column(Integer, ForeignKey("case.id", ondelete="CASCADE", use_alter=True))
     individual = relationship("IndividualContact", lazy="subquery", backref="participant")
-    individual_contact_id = Column(Integer, ForeignKey("individual_contact.id"))
+    individual_contact_id = Column(Integer, ForeignKey("individual_contact.id", ondelete="CASCADE"))
     participant_roles = relationship(
         "ParticipantRole", backref="participant", lazy="subquery", cascade="all, delete-orphan"
     )
@@ -96,6 +97,5 @@ class ParticipantReadMinimal(ParticipantBase):
     individual: Optional[IndividualContactReadMinimal]
 
 
-class ParticipantPagination(DispatchBase):
-    total: int
+class ParticipantPagination(Pagination):
     items: List[ParticipantRead] = []

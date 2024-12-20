@@ -1,36 +1,39 @@
 <template>
   <v-select
-    v-model="case_type"
+    v-model="selectedCaseType"
     :items="items"
     :menu-props="{ maxHeight: '400' }"
-    item-text="name"
-    label="Type"
+    item-title="name"
+    item-value="id"
+    :label="label"
+    :hint="hint"
     return-object
     :loading="loading"
+    no-filter
+    :error-messages="show_error"
+    :rules="[is_type_in_project]"
+    clearable
   >
-    <template v-slot:item="data">
-      <v-list-item-content>
-        <v-list-item-title v-text="data.item.name" />
-        <v-list-item-subtitle
-          style="width: 200px"
-          class="text-truncate"
-          v-text="data.item.description"
-        />
-      </v-list-item-content>
+    <template #item="data">
+      <v-list-subheader dense class="custom-subheader" v-if="data.item.raw.category">
+        {{ data.item.raw.category }}
+      </v-list-subheader>
+      <v-list-item v-bind="data.props" :title="null" v-if="!data.item.raw.category">
+        <v-list-item-title>{{ data.item.raw.name }}</v-list-item-title>
+        <v-list-item-subtitle class="truncate-text" :title="data.item.raw.description">
+          {{ data.item.raw.description }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
-    <template v-slot:append-item>
+    <template #append-item>
       <v-list-item v-if="more" @click="loadMore()">
-        <v-list-item-content>
-          <v-list-item-subtitle> Load More </v-list-item-subtitle>
-        </v-list-item-content>
+        <v-list-item-subtitle> Load More </v-list-item-subtitle>
       </v-list-item>
     </template>
   </v-select>
 </template>
 
 <script>
-import { cloneDeep } from "lodash"
-
 import SearchUtils from "@/search/utils"
 import CaseTypeApi from "@/case/type/api"
 
@@ -38,21 +41,21 @@ export default {
   name: "CaseTypeSelect",
 
   props: {
-    value: {
+    modelValue: {
       type: Object,
-      default: function () {
-        return {}
-      },
+      default: () => ({}),
     },
     project: {
-      type: [Object],
+      type: Object,
       default: null,
     },
     label: {
       type: String,
-      default: function () {
-        return "Type"
-      },
+      default: () => "Type",
+    },
+    hint: {
+      type: String,
+      default: () => "Case Type to associate",
     },
   },
 
@@ -61,29 +64,55 @@ export default {
       loading: false,
       items: [],
       more: false,
-      numItems: 5,
+      numItems: 40,
+      error: null,
+      lastProjectId: null,
+      is_type_in_project: () => {
+        this.validateType()
+        return this.error
+      },
     }
   },
 
   computed: {
-    case_type: {
+    selectedCaseType: {
       get() {
-        return cloneDeep(this.value)
+        if (!this.modelValue) return null
+        if (this.modelValue.id) {
+          return this.items.find((item) => item.id === this.modelValue.id) || null
+        }
+        if (this.modelValue.name) {
+          return this.items.find((item) => item.name === this.modelValue.name) || null
+        }
+        return null
       },
       set(value) {
-        this.$emit("input", value)
+        this.$emit("update:modelValue", value)
+        this.validateType()
       },
+    },
+    show_error() {
+      return null // Implement any specific error logic here if needed
     },
   },
 
   methods: {
     loadMore() {
-      this.numItems = this.numItems + 5
+      this.numItems += 40
       this.fetchData()
+    },
+    validateType() {
+      const project_id = this.project?.id || 0
+      const in_project = this.selectedCaseType?.project?.id == project_id
+      if (in_project) {
+        this.error = true
+      } else {
+        this.error = "Only types in selected project are allowed"
+      }
     },
     fetchData() {
       this.error = null
-      this.loading = "error"
+      this.loading = true
 
       let filterOptions = {
         sortBy: ["name"],
@@ -101,38 +130,65 @@ export default {
         }
       }
 
-      filterOptions = SearchUtils.createParametersFromTableOptions({ ...filterOptions })
+      filterOptions = SearchUtils.createParametersFromTableOptions({ ...filterOptions }, "CaseType")
 
-      CaseTypeApi.getAll(filterOptions).then((response) => {
-        this.items = response.data.items
+      CaseTypeApi.getAll(filterOptions)
+        .then((response) => {
+          this.items = []
+          let new_items = {}
+          response.data.items.forEach((item) => {
+            let category = "Team: " + (item.oncall_service?.name || "None")
+            new_items[category] = new_items[category] || []
+            new_items[category].push(item)
+          })
+          let keys = Object.keys(new_items)
+          keys.sort((a, b) => {
+            if (a === "Team: None") return 1
+            if (b === "Team: None") return -1
+            return a.localeCompare(b)
+          })
+          keys.forEach((category) => {
+            this.items.push({ category: category })
+            for (let item of new_items[category]) {
+              this.items.push(item)
+            }
+          })
+          this.more = response.data.total > this.items.length
+        })
+        .catch((error) => {
+          console.error("Error fetching case types:", error)
+          this.error = "Failed to load case types"
+        })
+        .finally(() => {
+          this.loading = false
+        })
+    },
+    resetSelection() {
+      this.$emit("update:modelValue", null)
+    },
+  },
 
-        if (this.case_type) {
-          // check to see if the current selection is available in the list and if not we add it
-          if (!this.items.find((match) => match.id === this.case_type.id)) {
-            this.items = [this.case_type].concat(this.items)
-          }
-        }
-
-        this.total = response.data.total
-        this.loading = false
-
-        if (this.items.length < this.total) {
-          this.more = true
-        } else {
-          this.more = false
-        }
-      })
+  watch: {
+    project() {
+      this.validateType()
+      this.fetchData()
     },
   },
 
   created() {
     this.fetchData()
-    this.$watch(
-      (vm) => [vm.project],
-      () => {
-        this.fetchData()
-      }
-    )
   },
 }
 </script>
+
+<style scoped>
+.truncate-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 500px;
+}
+.custom-subheader {
+  padding-left: 8px !important;
+}
+</style>

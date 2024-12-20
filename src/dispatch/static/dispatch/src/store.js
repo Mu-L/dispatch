@@ -1,16 +1,22 @@
-import Vue from "vue"
-import Vuex from "vuex"
-import { getField } from "vuex-map-fields"
+import { createStore } from "vuex"
 
 import app from "@/app/store"
 import auth from "@/auth/store"
 import case_management from "@/case/store"
+import case_cost_type from "@/case_cost_type/store"
 import case_priority from "@/case/priority/store"
 import case_severity from "@/case/severity/store"
 import case_type from "@/case/type/store"
+import cost_model from "@/cost_model/store"
 import definition from "@/definition/store"
 import document from "@/document/store"
-import feedback from "@/feedback/store"
+import email_templates from "@/email_templates/store"
+import entity from "@/entity/store"
+import entity_type from "@/entity_type/store"
+import forms from "@/forms/store"
+import forms_table from "@/forms/table/store"
+import forms_type from "@/forms/types/store"
+import incident_feedback from "@/feedback/incident/store"
 import incident from "@/incident/store"
 import incident_cost_type from "@/incident_cost_type/store"
 import incident_priority from "@/incident/priority/store"
@@ -20,6 +26,7 @@ import individual from "@/individual/store"
 import notification from "@/notification/store"
 import notification_backend from "@/app/notificationStore"
 import organization from "@/organization/store"
+import playground from "@/entity_type/playground/store"
 import plugin from "@/plugin/store"
 import project from "@/project/store"
 import query from "@/data/query/store"
@@ -27,7 +34,10 @@ import reference from "@/document/reference/store"
 import runbook from "@/document/runbook/store"
 import search from "@/search/store"
 import service from "@/service/store"
+import service_feedback from "@/feedback/service/store"
 import signal from "@/signal/store"
+import signalEngagement from "@/signal/engagement/store"
+import signalFilter from "@/signal/filter/store"
 import source from "@/data/source/store"
 import sourceDataFormat from "@/data/source/dataFormat/store"
 import sourceEnvironment from "@/data/source/environment/store"
@@ -42,20 +52,26 @@ import template from "@/document/template/store"
 import term from "@/term/store"
 import workflow from "@/workflow/store"
 
-Vue.use(Vuex)
-
-export default new Vuex.Store({
+export default createStore({
   modules: {
     app,
     auth,
+    case_cost_type,
     case_management,
     case_priority,
     case_severity,
     case_type,
     definition,
     document,
-    feedback,
+    email_templates,
+    entity,
+    entity_type,
+    forms,
+    forms_table,
+    forms_type,
+    incident_feedback,
     incident,
+    cost_model,
     incident_cost_type,
     incident_priority,
     incident_severity,
@@ -64,19 +80,15 @@ export default new Vuex.Store({
     notification,
     notification_backend,
     organization,
+    playground,
     plugin,
     project,
     query,
     reference,
-    route: {
-      namespaced: true,
-      getters: {
-        getField,
-      },
-    },
     runbook,
     search,
     service,
+    service_feedback,
     source,
     sourceDataFormat,
     sourceEnvironment,
@@ -84,6 +96,8 @@ export default new Vuex.Store({
     sourceTransport,
     sourceType,
     signal,
+    signalEngagement,
+    signalFilter,
     tag,
     tag_type,
     task,

@@ -2,23 +2,21 @@
   <v-select
     v-model="incidentSeverity"
     :items="items"
-    item-text="name"
+    item-title="name"
     :menu-props="{ maxHeight: '400' }"
     label="Severity"
     return-object
     :loading="loading"
+    :error-messages="show_error"
+    :rules="[is_severity_in_project]"
   >
-    <template v-slot:item="data">
-      <template>
-        <v-list-item-content>
-          <v-list-item-title v-text="data.item.name" />
-          <v-list-item-subtitle
-            style="width: 200px"
-            class="text-truncate"
-            v-text="data.item.description"
-          />
-        </v-list-item-content>
-      </template>
+    <template #item="data">
+      <v-list-item v-bind="data.props" :title="null">
+        <v-list-item-title>{{ data.item.raw.name }}</v-list-item-title>
+        <v-list-item-subtitle :title="data.item.raw.description">
+          {{ data.item.raw.description }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
   </v-select>
 </template>
@@ -33,7 +31,7 @@ export default {
   name: "IncidentSeveritySelect",
 
   props: {
-    value: {
+    modelValue: {
       type: Object,
       default: function () {
         return {}
@@ -43,27 +41,52 @@ export default {
       type: [Object],
       default: null,
     },
+    status: {
+      type: String,
+      default: "",
+    },
   },
 
   data() {
     return {
       loading: false,
       items: [],
+      error: null,
+      is_severity_in_project: () => {
+        this.validateSeverity()
+        return this.error
+      },
     }
   },
 
   computed: {
     incidentSeverity: {
       get() {
-        return cloneDeep(this.value)
+        return cloneDeep(this.modelValue)
       },
       set(value) {
-        this.$emit("input", value)
+        this.$emit("update:modelValue", value)
+        this.validateSeverity()
       },
+    },
+    show_error() {
+      if (this.status != "Active" && this.modelValue?.allowed_for_stable_incidents === false) {
+        return `Severity cannot be ${this.modelValue?.name} for ${this.status} incidents`
+      }
+      return null
     },
   },
 
   methods: {
+    validateSeverity() {
+      const project_id = this.project?.id || 0
+      const in_project = this.incidentSeverity?.project?.id == project_id
+      if (in_project) {
+        this.error = true
+      } else {
+        this.error = "Only severities in selected project are allowed"
+      }
+    },
     fetchData() {
       this.error = null
       this.loading = "error"
@@ -93,6 +116,7 @@ export default {
 
       filterOptions = SearchUtils.createParametersFromTableOptions(
         { ...filterOptions },
+        "IncidentSeverity",
         enabledFilter
       )
 
@@ -109,6 +133,8 @@ export default {
       (vm) => [vm.project],
       () => {
         this.fetchData()
+        this.validateSeverity()
+        this.$emit("update:modelValue", this.incidentSeverity)
       }
     )
   },

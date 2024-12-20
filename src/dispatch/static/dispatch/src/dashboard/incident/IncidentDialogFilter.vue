@@ -1,54 +1,71 @@
 <template>
-  <v-dialog v-model="display" max-width="600px">
-    <template v-slot:activator="{ on }">
-      <v-badge :value="numFilters" bordered overlap color="info" :content="numFilters">
-        <v-btn color="secondary" v-on="on"> Filter </v-btn>
+  <v-dialog v-model="display" max-width="600">
+    <template #activator="{ props }">
+      <v-badge :model-value="!!numFilters" bordered color="info" :content="numFilters">
+        <v-btn color="secondary" v-bind="props"> Filter </v-btn>
       </v-badge>
     </template>
     <v-card>
       <v-card-title>
-        <span class="headline">Dashboard Incident Filters</span>
+        <span class="text-h5">Dashboard Incident Filters</span>
       </v-card-title>
-      <v-list dense>
+      <v-list density="compact">
         <v-list-item>
-          <v-list-item-content>
-            <date-window-input v-model="filters.reported_at" label="Reported At" />
-          </v-list-item-content>
+          <date-window-input v-model="filters.reported_at" label="Reported At" />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <date-window-input v-model="filters.closed_at" label="Closed At" />
-          </v-list-item-content>
+          <date-window-input v-model="filters.closed_at" label="Closed At" />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <project-combobox v-model="filters.project" label="Projects" />
-          </v-list-item-content>
+          <project-combobox v-model="filters.project" label="Projects" />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <tag-filter-auto-complete v-model="filters.tag" label="Tags" />
-          </v-list-item-content>
+          <tag-filter-auto-complete
+            v-model="filters.tag"
+            label="Tags"
+            model="incident"
+            :project="filters.project"
+          />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <incident-type-combobox v-model="filters.incident_type" />
-          </v-list-item-content>
+          <incident-type-combobox :project="filters.project" v-model="filters.incident_type" />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <incident-severity-combobox v-model="filters.incident_severity" />
-          </v-list-item-content>
+          <incident-severity-combobox
+            :project="filters.project"
+            v-model="filters.incident_severity"
+          />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <incident-priority-combobox v-model="filters.incident_priority" />
-          </v-list-item-content>
+          <incident-priority-combobox
+            :project="filters.project"
+            v-model="filters.incident_priority"
+          />
+        </v-list-item>
+        <v-list-item>
+          <v-card class="mx-auto">
+            <v-card-title>Incident Participant</v-card-title>
+            <v-card-subtitle>Show only incidents with this participant</v-card-subtitle>
+            <participant-select
+              class="ml-10 mr-5"
+              v-model="local_participant"
+              label="Participant"
+              hint="Show only incidents with this participant"
+              :project="filters.project"
+              clearable
+            />
+            <v-checkbox
+              class="ml-10 mr-5"
+              v-model="local_participant_is_commander"
+              label="And this participant is the Incident Commander"
+              :disabled="local_participant == null"
+            />
+          </v-card>
         </v-list-item>
       </v-list>
       <v-card-actions>
         <v-spacer />
-        <v-btn color="info" text @click="applyFilters()"> Apply Filters </v-btn>
+        <v-btn color="info" variant="text" @click="applyFilters()"> Apply Filters </v-btn>
       </v-card-actions>
     </v-card>
   </v-dialog>
@@ -56,7 +73,6 @@
 
 <script>
 import { sum } from "lodash"
-import { mapFields } from "vuex-map-fields"
 
 import startOfMonth from "date-fns/startOfMonth"
 import subMonths from "date-fns/subMonths"
@@ -69,7 +85,8 @@ import IncidentTypeCombobox from "@/incident/type/IncidentTypeCombobox.vue"
 import ProjectCombobox from "@/project/ProjectCombobox.vue"
 import RouterUtils from "@/router/utils"
 import SearchUtils from "@/search/utils"
-import TagFilterAutoComplete from "@/tag/TagFilterAutoComplete.vue"
+import TagFilterAutoComplete from "@/tag/TagPicker.vue"
+import ParticipantSelect from "@/components/ParticipantSelect.vue"
 
 let today = function () {
   let now = new Date()
@@ -77,7 +94,7 @@ let today = function () {
 }
 
 export default {
-  name: "IncidentOverviewFilterDialog",
+  name: "IncidentDialogFilter",
 
   components: {
     DateWindowInput,
@@ -86,6 +103,7 @@ export default {
     IncidentTypeCombobox,
     ProjectCombobox,
     TagFilterAutoComplete,
+    ParticipantSelect,
   },
 
   props: {
@@ -118,6 +136,8 @@ export default {
           end: null,
         },
       },
+      local_participant_is_commander: false,
+      local_participant: null,
     }
   },
 
@@ -130,14 +150,26 @@ export default {
         this.filters.project.length,
         this.filters.status.length,
         this.filters.tag.length,
+        this.local_participant == null ? 0 : 1,
         1,
       ])
     },
-    ...mapFields("route", ["query"]),
   },
 
   methods: {
     applyFilters() {
+      if (this.local_participant) {
+        if (Array.isArray(this.local_participant)) {
+          this.local_participant = this.local_participant[0]
+        }
+        if (this.local_participant_is_commander) {
+          this.filters.commander = this.local_participant
+          this.filters.participant = null
+        } else {
+          this.filters.commander = null
+          this.filters.participant = this.local_participant
+        }
+      }
       RouterUtils.updateURLFilters(this.filters)
       this.fetchData()
       // we close the dialog
@@ -189,7 +221,7 @@ export default {
           end: today().toISOString().slice(0, -1),
         },
       },
-      ...RouterUtils.deserializeFilters(this.query), // Order matters as values will overwrite
+      ...RouterUtils.deserializeFilters(this.$route.query), // Order matters as values will overwrite
     }
     this.fetchData()
   },

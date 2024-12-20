@@ -3,7 +3,6 @@ import logging
 from typing import List, Optional, Type
 
 from dispatch.database.core import Base
-from dispatch.case.models import Case
 from dispatch.models import PrimaryKey
 from dispatch.plugin import service as plugin_service
 from dispatch.project import service as project_service
@@ -16,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def get(*, db_session, notification_id: int) -> Optional[Notification]:
-    """Gets a notifcation by id."""
+    """Gets a notification by id."""
     return db_session.query(Notification).filter(Notification.id == notification_id).one_or_none()
 
 
@@ -144,6 +143,7 @@ def filter_and_send(
         for search_filter in notification.filters:
             match = search_filter_service.match(
                 db_session=db_session,
+                subject=search_filter.subject,
                 filter_spec=search_filter.expression,
                 class_instance=class_instance,
             )

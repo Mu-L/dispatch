@@ -4,7 +4,7 @@ from collections import namedtuple
 from collections.abc import Iterable
 from inspect import signature
 from itertools import chain
-from typing import List
+from typing import Annotated, List
 
 from fastapi import Depends, Query
 from pydantic import BaseModel
@@ -20,22 +20,25 @@ from sqlalchemy_filters.exceptions import BadFilterFormat, FieldNotFound
 from sqlalchemy_filters.models import Field, get_model_from_spec
 
 from dispatch.auth.models import DispatchUser
-from dispatch.auth.service import get_current_role, get_current_user
+from dispatch.auth.service import CurrentUser, get_current_role
 from dispatch.case.models import Case
 from dispatch.data.query.models import Query as QueryModel
 from dispatch.data.source.models import Source
+from dispatch.database.core import DbSession
 from dispatch.enums import UserRoles, Visibility
 from dispatch.exceptions import FieldNotFoundError, InvalidFilterError
-from dispatch.feedback.models import Feedback
+from dispatch.feedback.incident.models import Feedback
 from dispatch.incident.models import Incident
 from dispatch.incident.type.models import IncidentType
 from dispatch.individual.models import IndividualContact
 from dispatch.participant.models import Participant
 from dispatch.plugin.models import Plugin, PluginInstance
 from dispatch.search.fulltext.composite_search import CompositeSearch
+from dispatch.signal.models import Signal, SignalInstance
+from dispatch.tag.models import Tag
 from dispatch.task.models import Task
 
-from .core import Base, get_class_by_tablename, get_db, get_model_name_by_tablename
+from .core import Base, get_class_by_tablename, get_model_name_by_tablename
 
 log = logging.getLogger(__file__)
 
@@ -94,9 +97,11 @@ class Filter(object):
         try:
             filter_spec["field"]
         except KeyError:
-            raise BadFilterFormat("`field` is a mandatory filter attribute.")
+            raise BadFilterFormat("`field` is a mandatory filter attribute.") from None
         except TypeError:
-            raise BadFilterFormat("Filter spec `{}` should be a dictionary.".format(filter_spec))
+            raise BadFilterFormat(
+                "Filter spec `{}` should be a dictionary.".format(filter_spec)
+            ) from None
 
         self.operator = Operator(filter_spec.get("op"))
         self.value = filter_spec.get("value")
@@ -106,11 +111,22 @@ class Filter(object):
 
     def get_named_models(self):
         if "model" in self.filter_spec:
-            return {self.filter_spec["model"]}
+            model = self.filter_spec["model"]
+            if model in ["Participant", "Commander", "Assignee"]:
+                return {"IndividualContact"}
+            if model == "TagAll":
+                return {"Tag"}
+            else:
+                return {self.filter_spec["model"]}
         return set()
 
     def format_for_sqlalchemy(self, query, default_model):
         filter_spec = self.filter_spec
+        if filter_spec.get("model") in ["Participant", "Commander", "Assignee"]:
+            filter_spec["model"] = "IndividualContact"
+        elif filter_spec.get("model") == "TagAll":
+            filter_spec["model"] = "Tag"
+
         operator = self.operator
         value = self.value
 
@@ -220,7 +236,7 @@ def get_model_class_by_name(registry, name):
 def get_named_models(filters):
     models = []
     for filter in filters:
-        models.append(filter.get_named_models())
+        models.extend(filter.get_named_models())
     return models
 
 
@@ -260,6 +276,7 @@ def apply_model_specific_filters(
     """Applies any model specific filter as it pertains to the given user."""
     model_map = {
         Incident: [restricted_incident_filter],
+        Case: [restricted_case_filter],
         # IncidentType: [restricted_incident_type_filter],
     }
 
@@ -279,7 +296,7 @@ def apply_filters(query, filter_spec, model_cls=None, do_auto_join=True):
 
     :param filter_spec:
                     A dict or an iterable of dicts, where each one includes
-                    the necesary information to create a filter to be applied to the
+                    the necessary information to create a filter to be applied to the
                     query.
 
                     Example::
@@ -306,11 +323,12 @@ def apply_filters(query, filter_spec, model_cls=None, do_auto_join=True):
                     The :class:`sqlalchemy.orm.Query` instance after all the filters
                     have been applied.
     """
-    filters = build_filters(filter_spec)
     default_model = get_default_model(query)
     if not default_model:
         default_model = model_cls
-    filter_models = get_named_models(filters)[0]
+
+    filters = build_filters(filter_spec)
+    filter_models = get_named_models(filters)
 
     if do_auto_join:
         query = auto_join(query, filter_models)
@@ -323,13 +341,12 @@ def apply_filters(query, filter_spec, model_cls=None, do_auto_join=True):
     return query
 
 
-def apply_filter_specific_joins(model: Base, filter_spec: dict, query: orm.query):
-    """Applies any model specific implicity joins."""
+def get_model_map(filters: dict) -> dict:
     # this is required because by default sqlalchemy-filter's auto-join
     # knows nothing about how to join many-many relationships.
     model_map = {
-        (Feedback, "Project"): (Incident, False),
         (Feedback, "Incident"): (Incident, False),
+        (Feedback, "Case"): (Case, False),
         (Task, "Project"): (Incident, False),
         (Task, "Incident"): (Incident, False),
         (Task, "IncidentPriority"): (Incident, False),
@@ -340,22 +357,50 @@ def apply_filter_specific_joins(model: Base, filter_spec: dict, query: orm.query
         (QueryModel, "Tag"): (QueryModel.tags, True),
         (QueryModel, "TagType"): (QueryModel.tags, True),
         (DispatchUser, "Organization"): (DispatchUser.organizations, True),
+        (Case, "Tag"): (Case.tags, True),
+        (Case, "TagType"): (Case.tags, True),
+        (Case, "IndividualContact"): (Case.participants, True),
         (Incident, "Tag"): (Incident.tags, True),
         (Incident, "TagType"): (Incident.tags, True),
+        (Incident, "IndividualContact"): (Incident.participants, True),
         (Incident, "Term"): (Incident.terms, True),
-        (Case, "Tag"): (Case.tags, True),
+        (Signal, "Tag"): (Signal.tags, True),
+        (Signal, "TagType"): {Signal.tags, True},
+        (SignalInstance, "Entity"): (SignalInstance.entities, True),
+        (SignalInstance, "EntityType"): (SignalInstance.entities, True),
+        (Tag, "TagType"): (Tag.tag_type, False),
     }
-    filters = build_filters(filter_spec)
-    filter_models = get_named_models(filters)[0]
-    for filter_model in filter_models:
-        if model_map.get((model, filter_model)):
-            joined_model, is_outer = model_map[(model, filter_model)]
+    # Replace mapping if looking for commander
+    if "Commander" in filters:
+        model_map.update({(Incident, "IndividualContact"): (Incident.commander, True)})
+    if "Assignee" in filters:
+        model_map.update({(Case, "IndividualContact"): (Case.assignee, True)})
+    return model_map
+
+
+def apply_model_specific_joins(model: Base, models: List[str], query: orm.query):
+    model_map = get_model_map(models)
+    joined_models = []
+
+    for include_model in models:
+        if model_map.get((model, include_model)):
+            joined_model, is_outer = model_map[(model, include_model)]
             try:
-                query = query.join(joined_model, isouter=is_outer)
+                if joined_model not in joined_models:
+                    query = query.join(joined_model, isouter=is_outer)
+                    joined_models.append(joined_model)
             except Exception as e:
-                log.debug(str(e))
+                log.exception(e)
 
     return query
+
+
+def apply_filter_specific_joins(model: Base, filter_spec: dict, query: orm.query):
+    """Applies any model specific implicitly joins."""
+    filters = build_filters(filter_spec)
+    filter_models = get_named_models(filters)
+
+    return apply_model_specific_joins(model, filter_models, query)
 
 
 def composite_search(*, db_session, query_str: str, models: List[Base], current_user: DispatchUser):
@@ -365,7 +410,7 @@ def composite_search(*, db_session, query_str: str, models: List[Base], current_
 
     # TODO can we do this with composite filtering?
     # for model in models:
-    # 	 query = apply_model_specific_filters(model, query, current_user)
+    #    query = apply_model_specific_filters(model, query, current_user)
 
     return s.search(query=query)
 
@@ -377,9 +422,22 @@ def search(*, query_str: str, query: Query, model: str, sort=False):
     if not query_str.strip():
         return query
 
-    vector = search_model.search_vector
+    search = []
+    if hasattr(search_model, "search_vector"):
+        vector = search_model.search_vector
+        search.append(vector.op("@@")(func.tsq_parse(query_str)))
 
-    query = query.filter(vector.op("@@")(func.tsq_parse(query_str)))
+    if hasattr(search_model, "name"):
+        search.append(
+            search_model.name.ilike(f"%{query_str}%"),
+        )
+        search.append(search_model.name == query_str)
+
+    if not search:
+        raise Exception(f"Search not supported for model: {model}")
+
+    query = query.filter(or_(*search))
+
     if sort:
         query = query.order_by(desc(func.ts_rank_cd(vector, func.tsq_parse(query_str))))
 
@@ -390,8 +448,15 @@ def create_sort_spec(model, sort_by, descending):
     """Creates sort_spec."""
     sort_spec = []
     if sort_by and descending:
-        for field, direction in zip(sort_by, descending):
+        for field, direction in zip(sort_by, descending, strict=False):
             direction = "desc" if direction else "asc"
+
+            # check to see if field is json with a key parameter
+            try:
+                new_field = json.loads(field)
+                field = new_field.get("key", "")
+            except json.JSONDecodeError:
+                pass
 
             # we have a complex field, we may need to join
             if "." in field:
@@ -416,14 +481,14 @@ def get_all(*, db_session, model):
 
 
 def common_parameters(
-    db_session: orm.Session = Depends(get_db),
+    current_user: CurrentUser,
+    db_session: DbSession,
     page: int = Query(1, gt=0, lt=2147483647),
     items_per_page: int = Query(5, alias="itemsPerPage", gt=-2, lt=2147483647),
     query_str: QueryStr = Query(None, alias="q"),
-    filter_spec: Json = Query([], alias="filter"),
+    filter_spec: QueryStr = Query(None, alias="filter"),
     sort_by: List[str] = Query([], alias="sortBy[]"),
     descending: List[bool] = Query([], alias="descending[]"),
-    current_user: DispatchUser = Depends(get_current_user),
     role: UserRoles = Depends(get_current_role),
 ):
     return {
@@ -439,11 +504,49 @@ def common_parameters(
     }
 
 
+CommonParameters = Annotated[
+    dict[str, int | CurrentUser | DbSession | QueryStr | Json | List[str] | List[bool] | UserRoles],
+    Depends(common_parameters),
+]
+
+
+def has_tag_all(filter_spec: List[dict]):
+    """Checks if the filter spec has a TagAll filter."""
+
+    if isinstance(filter_spec, list):
+        return False
+
+    for key, value in filter_spec.items():
+        if key == "and":
+            for condition in value:
+                or_condition = condition.get("or", [])
+                if or_condition and or_condition[0].get("model") == "TagAll":
+                    return True
+    return False
+
+
+def rebuild_filter_spec_without_tag_all(filter_spec: List[dict]):
+    """Rebuilds the filter spec without the TagAll filter."""
+    new_filter_spec = []
+    tag_all_spec = []
+    for key, value in filter_spec.items():
+        if key == "and":
+            for condition in value:
+                or_condition = condition.get("or", [])
+                if or_condition and or_condition[0].get("model") == "TagAll":
+                    for cond in or_condition:
+                        tag_all_spec.append({"and": [{"or": [cond]}]})
+                else:
+                    new_filter_spec.append(condition)
+    return ({"and": new_filter_spec} if len(new_filter_spec) else None, tag_all_spec)
+
+
 def search_filter_sort_paginate(
     db_session,
     model,
     query_str: str = None,
-    filter_spec: List[dict] = None,
+    filter_spec: str | dict | None = None,
+    include_keys: List[str] = None,
     page: int = 1,
     items_per_page: int = 5,
     sort_by: List[str] = None,
@@ -453,6 +556,7 @@ def search_filter_sort_paginate(
 ):
     """Common functionality for searching, filtering, sorting, and pagination."""
     model_cls = get_class_by_tablename(model)
+
     try:
         query = db_session.query(model_cls)
 
@@ -460,11 +564,38 @@ def search_filter_sort_paginate(
             sort = False if sort_by else True
             query = search(query_str=query_str, query=query, model=model, sort=sort)
 
-        query = apply_model_specific_filters(model_cls, query, current_user, role)
+        query_restricted = apply_model_specific_filters(model_cls, query, current_user, role)
 
+        tag_all_filters = []
         if filter_spec:
+            # some functions pass filter_spec as dictionary such as auth/views.py/get_users
+            # but most come from API as seraialized JSON
+            if isinstance(filter_spec, str):
+                filter_spec = json.loads(filter_spec)
             query = apply_filter_specific_joins(model_cls, filter_spec, query)
-            query = apply_filters(query, filter_spec, model_cls)
+            # if the filter_spec has the TagAll filter, we need to split the query up
+            # and intersect all of the results
+            if has_tag_all(filter_spec):
+                new_filter_spec, tag_all_spec = rebuild_filter_spec_without_tag_all(filter_spec)
+                if new_filter_spec:
+                    query = apply_filters(query, new_filter_spec, model_cls)
+                for tag_filter in tag_all_spec:
+                    tag_all_filters.append(apply_filters(query, tag_filter, model_cls))
+            else:
+                query = apply_filters(query, filter_spec, model_cls)
+
+        if include_keys:
+            query = apply_model_specific_joins(model_cls, include_keys, query)
+
+        if model == "Incident":
+            query = query.intersect(query_restricted)
+            for filter in tag_all_filters:
+                query = query.intersect(filter)
+
+        if model == "Case":
+            query = query.intersect(query_restricted)
+            for filter in tag_all_filters:
+                query = query.intersect(filter)
 
         if sort_by:
             sort_spec = create_sort_spec(model, sort_by, descending)
@@ -476,11 +607,11 @@ def search_filter_sort_paginate(
                 ErrorWrapper(FieldNotFoundError(msg=str(e)), loc="filter"),
             ],
             model=BaseModel,
-        )
+        ) from None
     except BadFilterFormat as e:
         raise ValidationError(
             [ErrorWrapper(InvalidFilterError(msg=str(e)), loc="filter")], model=BaseModel
-        )
+        ) from None
 
     if items_per_page == -1:
         items_per_page = None
@@ -511,13 +642,30 @@ def search_filter_sort_paginate(
 def restricted_incident_filter(query: orm.Query, current_user: DispatchUser, role: UserRoles):
     """Adds additional incident filters to query (usually for permissions)."""
     if role == UserRoles.member:
-        # We filter out resticted incidents for users with a member role if the user is not an incident participant
+        # We filter out restricted incidents for users with a member role if the user is not an incident participant
         query = (
             query.join(Participant, Incident.id == Participant.incident_id)
             .join(IndividualContact)
             .filter(
                 or_(
                     Incident.visibility == Visibility.open,
+                    IndividualContact.email == current_user.email,
+                )
+            )
+        )
+    return query.distinct()
+
+
+def restricted_case_filter(query: orm.Query, current_user: DispatchUser, role: UserRoles):
+    """Adds additional case filters to query (usually for permissions)."""
+    if role == UserRoles.member:
+        # We filter out restricted cases for users with a member role if the user is not a case participant
+        query = (
+            query.join(Participant, Case.id == Participant.case_id)
+            .join(IndividualContact)
+            .filter(
+                or_(
+                    Case.visibility == Visibility.open,
                     IndividualContact.email == current_user.email,
                 )
             )

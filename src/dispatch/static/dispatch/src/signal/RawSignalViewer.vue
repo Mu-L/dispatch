@@ -1,28 +1,32 @@
 <template>
-  <v-dialog v-model="dialog" persistent max-width="800px">
-    <template v-slot:activator="{ on }">
-      <v-btn class="mr-2" icon v-on="on"> <v-icon>mdi-card-search-outline</v-icon> </v-btn>
+  <v-dialog v-model="dialog" persistent max-width="1000px">
+    <template #activator="{ props }">
+      <v-btn class="mr-2" icon variant="text" v-bind="props">
+        <v-icon>mdi-card-search-outline</v-icon>
+      </v-btn>
     </template>
     <v-card>
       <v-card-title>
-        <span class="headline">Signal Data</span>
+        <span class="text-h5">Signal Data</span>
       </v-card-title>
       <v-card-text>
-        <div style="height: 400px">
-          <MonacoEditor v-model="raw_str" :options="editorOptions" language="json"></MonacoEditor>
+        <div style="height: 800px">
+          <MonacoEditor v-model="raw_str" :options="editorOptions" language="json" />
         </div>
       </v-card-text>
       <v-card-actions>
         <v-spacer />
-        <v-btn color="blue en-1" text @click="dialog = false"> Close </v-btn>
+        <v-btn color="blue en-1" variant="text" @click="dialog = false"> Close </v-btn>
       </v-card-actions>
     </v-card>
   </v-dialog>
 </template>
 
 <script>
+import MonacoEditor from "@/components/MonacoEditor.vue"
+
 export default {
-  name: "RawSignalDialog",
+  name: "RawSignalViewer",
 
   props: {
     value: {
@@ -34,7 +38,7 @@ export default {
   },
 
   components: {
-    MonacoEditor: () => import("monaco-editor-vue"),
+    MonacoEditor,
   },
 
   computed: {
@@ -52,6 +56,9 @@ export default {
         automaticLayout: true,
         renderValidationDecorations: "on",
         readOnly: true,
+        minimap: {
+          enabled: false,
+        },
       },
     }
   },

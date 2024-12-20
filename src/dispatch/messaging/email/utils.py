@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 
+import jinja2.exceptions
 from dispatch.config import MJML_PATH
 
 
@@ -11,6 +12,7 @@ from dispatch.messaging.strings import (
     INCIDENT_DAILY_REPORT_DESCRIPTION,
     INCIDENT_FEEDBACK_DAILY_REPORT_DESCRIPTION,
     INCIDENT_TASK_REMINDER_DESCRIPTION,
+    CASE_FEEDBACK_DAILY_REPORT_DESCRIPTION,
     MessageType,
     render_message_template,
 )
@@ -20,13 +22,16 @@ from .filters import env
 log = logging.getLogger(__name__)
 
 
-def get_template(message_type: MessageType):
+def get_template(message_type: MessageType, project_id: int):
     """Fetches the correct template based on the message type."""
     template_map = {
+        MessageType.incident_completed_form_notification: ("notification.mjml", None),
         MessageType.incident_executive_report: ("executive_report.mjml", None),
         MessageType.incident_notification: ("notification.mjml", None),
+        MessageType.case_notification: ("notification.mjml", None),
         MessageType.incident_participant_welcome: ("notification.mjml", None),
         MessageType.incident_tactical_report: ("tactical_report.mjml", None),
+        MessageType.case_participant_welcome: ("notification.mjml", None),
         MessageType.incident_task_reminder: (
             "notification_list.mjml",
             INCIDENT_TASK_REMINDER_DESCRIPTION,
@@ -39,25 +44,37 @@ def get_template(message_type: MessageType):
             "notification_list.mjml",
             INCIDENT_FEEDBACK_DAILY_REPORT_DESCRIPTION,
         ),
+        MessageType.case_feedback_daily_report: (
+            "notification_list.mjml",
+            CASE_FEEDBACK_DAILY_REPORT_DESCRIPTION,
+        ),
         MessageType.incident_daily_report: (
             "notification_list.mjml",
             INCIDENT_DAILY_REPORT_DESCRIPTION,
         ),
     }
 
-    template_path, description = template_map.get(message_type, (None, None))
+    template_key, description = template_map.get(message_type, (None, None))
 
-    if not template_path:
+    if not template_key:
         raise Exception(f"Unable to determine template. MessageType: {message_type}")
 
-    return env.get_template(os.path.join("templates", template_path)), description
+    try:
+        template_path = os.path.join("templates", "project_id", f"{project_id}", template_key)
+        template = env.get_template(template_path)
+    except jinja2.exceptions.TemplateNotFound:
+        template_path = os.path.join("templates", template_key)
+        template = env.get_template(template_path)
+    log.debug("Resolved template path: %s", template_path)
+
+    return template, description
 
 
 def create_multi_message_body(
-    message_template: dict, message_type: MessageType, items: list, **kwargs
+    message_template: dict, message_type: MessageType, items: list, project_id: int, **kwargs
 ):
     """Creates a multi message message body based on message type."""
-    template, description = get_template(message_type)
+    template, description = get_template(message_type, project_id)
 
     master_map = []
     for item in items:
@@ -67,9 +84,11 @@ def create_multi_message_body(
     return render_html(template.render(**kwargs))
 
 
-def create_message_body(message_template: dict, message_type: MessageType, **kwargs):
+def create_message_body(
+    message_template: dict, message_type: MessageType, project_id: int, **kwargs
+):
     """Creates the correct message body based on message type."""
-    template, description = get_template(message_type)
+    template, description = get_template(message_type, project_id)
 
     items_grouped_rendered = []
     if kwargs.get("items_grouped"):

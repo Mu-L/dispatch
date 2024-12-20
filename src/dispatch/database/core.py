@@ -1,7 +1,9 @@
 import functools
 import re
-from typing import Any
+from contextlib import contextmanager
+from typing import Annotated, Any
 
+from fastapi import Depends
 from pydantic import BaseModel
 from pydantic.error_wrappers import ErrorWrapper, ValidationError
 from sqlalchemy import create_engine, inspect
@@ -11,6 +13,7 @@ from sqlalchemy.sql.expression import true
 from sqlalchemy_utils import get_mapper
 from starlette.requests import Request
 
+
 from dispatch import config
 from dispatch.exceptions import NotFoundError
 from dispatch.search.fulltext import make_searchable
@@ -19,6 +22,7 @@ engine = create_engine(
     config.SQLALCHEMY_DATABASE_URI,
     pool_size=config.DATABASE_ENGINE_POOL_SIZE,
     max_overflow=config.DATABASE_ENGINE_MAX_OVERFLOW,
+    pool_pre_ping=config.DATABASE_ENGINE_POOL_PING,
 )
 
 
@@ -90,8 +94,9 @@ class CustomBase:
         for key in self.__repr_attrs__:
             if not hasattr(self, key):
                 raise KeyError(
-                    "{} has incorrect attribute '{}' in "
-                    "__repr__attrs__".format(self.__class__, key)
+                    "{} has incorrect attribute '{}' in " "__repr__attrs__".format(
+                        self.__class__, key
+                    )
                 )
             value = getattr(self, key)
             wrap_in_quote = isinstance(value, str)
@@ -123,6 +128,9 @@ make_searchable(Base.metadata)
 
 def get_db(request: Request):
     return request.state.db
+
+
+DbSession = Annotated[Session, Depends(get_db)]
 
 
 def get_model_name_by_tablename(table_fullname: str) -> str:
@@ -195,3 +203,31 @@ def refetch_db_session(organization_slug: str) -> Session:
     )
     db_session = sessionmaker(bind=schema_engine)()
     return db_session
+
+
+@contextmanager
+def get_session():
+    """Context manager to ensure the session is closed after use."""
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@contextmanager
+def get_organization_session(organization_slug: str):
+    """Context manager to ensure the session is closed after use."""
+    session = refetch_db_session(organization_slug)
+    try:
+        yield session
+        session.commit()
+    except:
+        session.rollback()
+        raise
+    finally:
+        session.close()

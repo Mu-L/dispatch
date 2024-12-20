@@ -1,8 +1,9 @@
 from collections import Counter, defaultdict
 from datetime import datetime
-from typing import ForwardRef, List, Optional
+from typing import List, Optional
 
-from pydantic import validator
+from pydantic import validator, Field, AnyHttpUrl
+
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, PrimaryKeyConstraint, String, Table
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import relationship
@@ -33,9 +34,19 @@ from dispatch.incident.type.models import (
     IncidentTypeRead,
     IncidentTypeReadMinimal,
 )
-from dispatch.incident_cost.models import IncidentCostRead, IncidentCostUpdate
+from dispatch.incident_cost.models import (
+    IncidentCostRead,
+    IncidentCostUpdate,
+)
 from dispatch.messaging.strings import INCIDENT_RESOLUTION_DEFAULT
-from dispatch.models import DispatchBase, NameStr, PrimaryKey, ProjectMixin, TimeStampMixin
+from dispatch.models import (
+    DispatchBase,
+    NameStr,
+    PrimaryKey,
+    ProjectMixin,
+    TimeStampMixin,
+    Pagination,
+)
 from dispatch.participant.models import (
     Participant,
     ParticipantRead,
@@ -45,7 +56,8 @@ from dispatch.participant.models import (
 from dispatch.report.enums import ReportTypes
 from dispatch.report.models import ReportRead
 from dispatch.storage.models import StorageRead
-from dispatch.tag.models import TagRead, TagReadMinimal
+from dispatch.tag.models import TagRead
+from dispatch.task.enums import TaskStatus
 from dispatch.term.models import TermRead
 from dispatch.ticket.models import TicketRead
 from dispatch.workflow.models import WorkflowInstanceRead
@@ -81,6 +93,8 @@ class Incident(Base, TimeStampMixin, ProjectMixin):
     participants_location = Column(String)
     commanders_location = Column(String)
     reporters_location = Column(String)
+    delay_executive_report_reminder = Column(DateTime, nullable=True)
+    delay_tactical_report_reminder = Column(DateTime, nullable=True)
 
     # auto generated
     reported_at = Column(DateTime, default=datetime.utcnow)
@@ -183,14 +197,10 @@ class Incident(Base, TimeStampMixin, ProjectMixin):
     )
 
     commander_id = Column(Integer, ForeignKey("participant.id"))
-    commander = relationship(
-        "Participant", foreign_keys=[commander_id], lazy="subquery", post_update=True
-    )
+    commander = relationship("Participant", foreign_keys=[commander_id], post_update=True)
 
     reporter_id = Column(Integer, ForeignKey("participant.id"))
-    reporter = relationship(
-        "Participant", foreign_keys=[reporter_id], lazy="subquery", post_update=True
-    )
+    reporter = relationship("Participant", foreign_keys=[reporter_id], post_update=True)
 
     liaison_id = Column(Integer, ForeignKey("participant.id"))
     liaison = relationship("Participant", foreign_keys=[liaison_id], post_update=True)
@@ -210,13 +220,15 @@ class Incident(Base, TimeStampMixin, ProjectMixin):
     notifications_group_id = Column(Integer, ForeignKey("group.id"))
     notifications_group = relationship("Group", foreign_keys=[notifications_group_id])
 
+    summary = Column(String, nullable=True)
+
     @hybrid_property
     def total_cost(self):
+        total_cost = 0
         if self.incident_costs:
-            total_cost = 0
             for cost in self.incident_costs:
                 total_cost += cost.amount
-            return total_cost
+        return total_cost
 
     @observes("participants")
     def participant_observer(self, participants):
@@ -228,11 +240,33 @@ class ProjectRead(DispatchBase):
     id: Optional[PrimaryKey]
     name: NameStr
     color: Optional[str]
+    stable_priority: Optional[IncidentPriorityRead] = None
+    allow_self_join: Optional[bool] = Field(True, nullable=True)
+    display_name: Optional[str] = Field(None, nullable=True)
 
 
 class CaseRead(DispatchBase):
     id: PrimaryKey
     name: Optional[NameStr]
+
+
+class TaskRead(DispatchBase):
+    id: PrimaryKey
+    assignees: List[Optional[ParticipantRead]] = []
+    created_at: Optional[datetime]
+    description: Optional[str] = Field(None, nullable=True)
+    status: TaskStatus = TaskStatus.open
+    owner: Optional[ParticipantRead]
+    weblink: Optional[AnyHttpUrl] = Field(None, nullable=True)
+    resolve_by: Optional[datetime]
+    resolved_at: Optional[datetime]
+    ticket: Optional[TicketRead] = None
+
+
+class TaskReadMinimal(DispatchBase):
+    id: PrimaryKey
+    description: Optional[str] = Field(None, nullable=True)
+    status: TaskStatus = TaskStatus.open
 
 
 # Pydantic models...
@@ -258,6 +292,7 @@ class IncidentBase(DispatchBase):
 
 class IncidentCreate(IncidentBase):
     commander: Optional[ParticipantUpdate]
+    commander_email: Optional[str]
     incident_priority: Optional[IncidentPriorityCreate]
     incident_severity: Optional[IncidentSeverityCreate]
     incident_type: Optional[IncidentTypeCreate]
@@ -266,7 +301,9 @@ class IncidentCreate(IncidentBase):
     tags: Optional[List[TagRead]] = []
 
 
-IncidentReadMinimal = ForwardRef("IncidentReadMinimal")
+class IncidentReadBasic(DispatchBase):
+    id: PrimaryKey
+    name: Optional[NameStr]
 
 
 class IncidentReadMinimal(IncidentBase):
@@ -275,9 +312,11 @@ class IncidentReadMinimal(IncidentBase):
     commander: Optional[ParticipantReadMinimal]
     commanders_location: Optional[str]
     created_at: Optional[datetime] = None
-    duplicates: Optional[List[IncidentReadMinimal]] = []
+    duplicates: Optional[List[IncidentReadBasic]] = []
     incident_costs: Optional[List[IncidentCostRead]] = []
+    incident_document: Optional[DocumentRead] = None
     incident_priority: IncidentPriorityReadMinimal
+    incident_review_document: Optional[DocumentRead] = None
     incident_severity: IncidentSeverityReadMinimal
     incident_type: IncidentTypeReadMinimal
     name: Optional[NameStr]
@@ -288,17 +327,19 @@ class IncidentReadMinimal(IncidentBase):
     reporter: Optional[ParticipantReadMinimal]
     reporters_location: Optional[str]
     stable_at: Optional[datetime] = None
-    tags: Optional[List[TagReadMinimal]] = []
+    storage: Optional[StorageRead] = None
+    summary: Optional[str] = None
+    tags: Optional[List[TagRead]] = []
+    tasks: Optional[List[TaskReadMinimal]] = []
     total_cost: Optional[float]
-
-
-IncidentReadMinimal.update_forward_refs()
 
 
 class IncidentUpdate(IncidentBase):
     cases: Optional[List[CaseRead]] = []
     commander: Optional[ParticipantUpdate]
-    duplicates: Optional[List[IncidentReadMinimal]] = []
+    delay_executive_report_reminder: Optional[datetime] = None
+    delay_tactical_report_reminder: Optional[datetime] = None
+    duplicates: Optional[List[IncidentReadBasic]] = []
     incident_costs: Optional[List[IncidentCostUpdate]] = []
     incident_priority: IncidentPriorityBase
     incident_severity: IncidentSeverityBase
@@ -306,6 +347,7 @@ class IncidentUpdate(IncidentBase):
     reported_at: Optional[datetime] = None
     reporter: Optional[ParticipantUpdate]
     stable_at: Optional[datetime] = None
+    summary: Optional[str] = None
     tags: Optional[List[TagRead]] = []
     terms: Optional[List[TermRead]] = []
 
@@ -313,12 +355,12 @@ class IncidentUpdate(IncidentBase):
     def find_exclusive(cls, v):
         if v:
             exclusive_tags = defaultdict(list)
-            for t in v:
-                if t.tag_type.exclusive:
-                    exclusive_tags[t.tag_type.id].append(t)
+            for tag in v:
+                if tag.tag_type.exclusive:
+                    exclusive_tags[tag.tag_type.id].append(tag)
 
-            for v in exclusive_tags.values():
-                if len(v) > 1:
+            for tag_types in exclusive_tags.values():
+                if len(tag_types) > 1:
                     raise ValueError(
                         f"Found multiple exclusive tags. Please ensure that only one tag of a given type is applied. Tags: {','.join([t.name for t in v])}"  # noqa: E501
                     )
@@ -327,16 +369,26 @@ class IncidentUpdate(IncidentBase):
 
 class IncidentRead(IncidentBase):
     id: PrimaryKey
+    cases: Optional[List[CaseRead]] = []
     closed_at: Optional[datetime] = None
     commander: Optional[ParticipantRead]
     commanders_location: Optional[str]
+    conference: Optional[ConferenceRead] = None
+    conversation: Optional[ConversationRead] = None
     created_at: Optional[datetime] = None
-    duplicates: Optional[List[IncidentReadMinimal]] = []
+    delay_executive_report_reminder: Optional[datetime] = None
+    delay_tactical_report_reminder: Optional[datetime] = None
+    documents: Optional[List[DocumentRead]] = []
+    duplicates: Optional[List[IncidentReadBasic]] = []
+    events: Optional[List[EventRead]] = []
     incident_costs: Optional[List[IncidentCostRead]] = []
     incident_priority: IncidentPriorityRead
     incident_severity: IncidentSeverityRead
     incident_type: IncidentTypeRead
+    last_executive_report: Optional[ReportRead]
+    last_tactical_report: Optional[ReportRead]
     name: Optional[NameStr]
+    participants: Optional[List[ParticipantRead]] = []
     participants_location: Optional[str]
     participants_team: Optional[str]
     project: ProjectRead
@@ -344,32 +396,21 @@ class IncidentRead(IncidentBase):
     reporter: Optional[ParticipantRead]
     reporters_location: Optional[str]
     stable_at: Optional[datetime] = None
-    tags: Optional[List[TagRead]] = []
-    total_cost: Optional[float]
-    cases: Optional[List[CaseRead]] = []
-    conference: Optional[ConferenceRead] = None
-    conversation: Optional[ConversationRead] = None
-    documents: Optional[List[DocumentRead]] = []
-    duplicates: Optional[List[IncidentReadMinimal]] = []
-    events: Optional[List[EventRead]] = []
-    last_executive_report: Optional[ReportRead]
-    last_tactical_report: Optional[ReportRead]
-    participants: Optional[List[ParticipantRead]] = []
     storage: Optional[StorageRead] = None
+    summary: Optional[str] = None
+    tags: Optional[List[TagRead]] = []
+    tasks: Optional[List[TaskRead]] = []
     terms: Optional[List[TermRead]] = []
     ticket: Optional[TicketRead] = None
+    total_cost: Optional[float]
     workflow_instances: Optional[List[WorkflowInstanceRead]] = []
 
 
-class IncidentExpandedPagination(DispatchBase):
-    total: int
+class IncidentExpandedPagination(Pagination):
     itemsPerPage: int
     page: int
     items: List[IncidentRead] = []
 
 
-class IncidentPagination(DispatchBase):
-    total: int
-    itemsPerPage: int
-    page: int
+class IncidentPagination(Pagination):
     items: List[IncidentReadMinimal] = []

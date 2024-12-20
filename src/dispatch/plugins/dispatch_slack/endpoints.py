@@ -1,6 +1,5 @@
 from http import HTTPStatus
 import json
-import time
 
 from fastapi import APIRouter, HTTPException, Depends
 from starlette.background import BackgroundTask
@@ -20,7 +19,6 @@ from .feedback.interactive import configure as feedback_configure
 from .workflow import configure as workflow_configure
 from .messaging import get_incident_conversation_command_message
 
-
 router = APIRouter()
 
 
@@ -33,7 +31,9 @@ async def parse_request(request: Request):
     try:
         request = json.loads(request_body_form.get("payload"))
     except Exception:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=[{"msg": "Bad Request"}])
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail=[{"msg": "Bad Request"}]
+        ) from None
     return request
 
 
@@ -81,7 +81,18 @@ def get_request_handler(request: Request, body: bytes, organization: str) -> Sla
 )
 async def slack_events(request: Request, organization: str, body: bytes = Depends(get_body)):
     """Handle all incoming Slack events."""
+
     handler = get_request_handler(request=request, body=body, organization=organization)
+    try:
+        body_json = json.loads(body)
+        # if we're getting the url verification request,
+        # handle it synchronously so that slack api verification works
+        if body_json.get("type") == "url_verification":
+            return handler.handle(req=request, body=body)
+    except json.JSONDecodeError:
+        pass
+
+    # otherwise, handle it asynchronously
     task = BackgroundTask(handler.handle, req=request, body=body)
     return JSONResponse(
         background=task,
@@ -129,6 +140,6 @@ async def slack_actions(request: Request, organization: str, body: bytes = Depen
     "/slack/menu",
 )
 async def slack_menus(request: Request, organization: str, body: bytes = Depends(get_body)):
-    """Handle all incoming Slack actions."""
+    """Handle all incoming Slack menus."""
     handler = get_request_handler(request=request, body=body, organization=organization)
     return handler.handle(req=request, body=body)

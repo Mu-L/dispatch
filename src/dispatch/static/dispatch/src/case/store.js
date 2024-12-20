@@ -3,38 +3,50 @@ import { debounce } from "lodash"
 
 import SearchUtils from "@/search/utils"
 import CaseApi from "@/case/api"
+import ProjectApi from "@/project/api"
+import PluginApi from "@/plugin/api"
+import AuthApi from "@/auth/api"
 import router from "@/router"
 
 const getDefaultSelectedState = () => {
   return {
     assignee: null,
+    case_costs: [],
     case_priority: null,
     case_severity: null,
     case_type: null,
     closed_at: null,
+    conversation: null,
+    dedicated_channel: true,
     description: null,
     documents: [],
     duplicates: [],
     escalated_at: null,
     events: [],
+    genai_analysis: null,
     groups: [],
-    signals: [],
     id: null,
     incidents: [],
+    loading: false,
     name: null,
+    participant: null,
     project: null,
     related: [],
     reported_at: null,
+    reporter: null,
     resolution: null,
+    resolution_reason: null,
+    saving: false,
+    signals: [],
     status: null,
     storage: null,
     tags: [],
     ticket: null,
     title: null,
     triage_at: null,
+    updated_at: null,
     visibility: null,
     workflow_instances: null,
-    loading: false,
   }
 }
 
@@ -49,9 +61,11 @@ const state = {
   dialogs: {
     showDeleteDialog: false,
     showEditSheet: false,
-    showExport: false,
-    showNewSheet: false,
     showEscalateDialog: false,
+    showExport: false,
+    showHandoffDialog: false,
+    showClosedDialog: false,
+    showNewSheet: false,
   },
   report: {
     ...getDefaultReportState(),
@@ -80,16 +94,20 @@ const state = {
           start: null,
           end: null,
         },
+        participant: null,
       },
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["reported_at"],
       descending: [true],
     },
+    saving: false,
     loading: false,
     bulkEditLoading: false,
   },
+  default_project: null,
+  current_user_role: null,
 }
 
 const getters = {
@@ -103,6 +121,15 @@ const getters = {
 const actions = {
   getAll: debounce(({ commit, state }) => {
     commit("SET_TABLE_LOADING", "primary")
+    let default_params = {
+      filter: { field: "default", op: "==", value: true },
+    }
+    ProjectApi.getAll(default_params).then((response) => {
+      commit("SET_DEFAULT_PROJECT", response.data.items[0])
+    })
+    AuthApi.getUserRole().then((response) => {
+      commit("SET_CURRENT_USER_ROLE", response.data)
+    })
     let params = SearchUtils.createParametersFromTableOptions({ ...state.table.options }, "Case")
     return CaseApi.getAll(params)
       .then((response) => {
@@ -143,7 +170,7 @@ const actions = {
             "notification_backend/addBeNotification",
             {
               text: `Case '${payload.name}' could not be found.`,
-              type: "error",
+              type: "exception",
             },
             { root: true }
           )
@@ -187,6 +214,24 @@ const actions = {
     commit("SET_DIALOG_ESCALATE", false)
     commit("RESET_SELECTED")
     commit("incident/RESET_SELECTED", null, { root: true })
+    // force page reload to pick up the change to status
+    window.location.reload()
+  },
+  showHandoffDialog({ commit }, value) {
+    commit("SET_DIALOG_SHOW_HANDOFF", true)
+    commit("SET_SELECTED", value)
+  },
+  closeHandoffDialog({ commit }) {
+    commit("SET_DIALOG_SHOW_HANDOFF", false)
+    commit("RESET_SELECTED")
+  },
+  showClosedDialog({ commit }, value) {
+    commit("SET_DIALOG_SHOW_CLOSED", true)
+    commit("SET_SELECTED", value)
+  },
+  closeClosedDialog({ commit }) {
+    commit("SET_DIALOG_SHOW_CLOSED", false)
+    commit("RESET_SELECTED")
   },
   showExport({ commit }) {
     commit("SET_DIALOG_SHOW_EXPORT", true)
@@ -199,16 +244,17 @@ const actions = {
     return CaseApi.escalate(state.selected.id, payload).then((response) => {
       commit("incident/SET_SELECTED", response.data, { root: true })
       commit("SET_SELECTED_LOADING", false)
-      var interval = setInterval(function () {
-        if (state.selected.id) {
-          dispatch("incident/get", response.data.id, { root: true })
-        }
 
-        // TODO this is fragile but we don't set anything as "created"
-        if (state.selected.storage) {
-          clearInterval(interval)
-        }
-      }, 5000)
+      return new Promise((resolve) => {
+        const interval = setInterval(() => {
+          dispatch("incident/get", response.data.id, { root: true }).then((incidentData) => {
+            if (incidentData.conversation && incidentData.storage && incidentData.documents) {
+              clearInterval(interval)
+              resolve(incidentData)
+            }
+          })
+        }, 5000)
+      })
     })
   },
   report({ commit, dispatch }) {
@@ -217,14 +263,14 @@ const actions = {
       .then((response) => {
         commit("SET_SELECTED", response.data)
         commit("SET_SELECTED_LOADING", false)
-        this.interval = setInterval(function () {
+        var interval = setInterval(function () {
           if (state.selected.id) {
             dispatch("get")
           }
 
           // TODO this is fragile but we don't set anything as "created"
           if (state.selected.conversation) {
-            clearInterval(this.interval)
+            clearInterval(interval)
           }
         }, 5000)
       })
@@ -232,7 +278,79 @@ const actions = {
         commit("SET_SELECTED_LOADING", false)
       })
   },
+  createAllResources({ commit, dispatch }) {
+    commit("SET_SELECTED_LOADING", true)
+    return CaseApi.createAllResources(state.selected.id)
+      .then(() => {
+        CaseApi.get(state.selected.id).then((response) => {
+          commit("SET_SELECTED", response.data)
+          dispatch("getEnabledPlugins").then((enabledPlugins) => {
+            // Poll the server for resource creation updates.
+            var interval = setInterval(function () {
+              if (
+                state.selected.conversation ^ enabledPlugins.includes("conversation") ||
+                state.selected.documents ^ enabledPlugins.includes("document") ||
+                state.selected.storage ^ enabledPlugins.includes("storage") ||
+                state.selected.groups ^ enabledPlugins.includes("participant-group") ||
+                state.selected.ticket ^ enabledPlugins.includes("ticket")
+              ) {
+                dispatch("get").then(() => {
+                  clearInterval(interval)
+                  commit("SET_SELECTED_LOADING", false)
+                  commit(
+                    "notification_backend/addBeNotification",
+                    { text: "Resources(s) created successfully.", type: "success" },
+                    { root: true }
+                  )
+                })
+              }
+            }, 5000)
+          })
+        })
+      })
+      .catch(() => {
+        commit("SET_SELECTED_LOADING", false)
+      })
+  },
+  createCaseChannel({ commit, dispatch }) {
+    state.selected.dedicated_channel = true
+    return CaseApi.createCaseChannel(state.selected.id)
+      .then(() => {
+        CaseApi.get(state.selected.id).then((response) => {
+          commit("SET_SELECTED", response.data)
+          dispatch("getEnabledPlugins").then((enabledPlugins) => {
+            // Poll the server for resource creation updates.
+            var interval = setInterval(function () {
+              if (
+                state.selected.conversation ^
+                enabledPlugins.includes("conversation") ^
+                !state.selected.conversation.thread_id
+              ) {
+                dispatch("get").then(() => {
+                  clearInterval(interval)
+                  commit("SET_SELECTED_LOADING", false)
+                  commit(
+                    "notification_backend/addBeNotification",
+                    { text: "Conversation channel created successfully.", type: "success" },
+                    { root: true }
+                  )
+                })
+              }
+            }, 5000)
+          })
+        })
+      })
+      .catch(() => {
+        commit("SET_SELECTED_LOADING", false)
+      })
+  },
   save({ commit, dispatch }) {
+    if (Array.isArray(state.selected.reporter)) {
+      state.selected.reporter = state.selected.reporter[0]
+    }
+    if (Array.isArray(state.selected.assignee)) {
+      state.selected.assignee = state.selected.assignee[0]
+    }
     commit("SET_SELECTED_LOADING", true)
     if (!state.selected.id) {
       return CaseApi.create(state.selected)
@@ -309,10 +427,56 @@ const actions = {
       )
     })
   },
+  joinCase({ commit }, caseId) {
+    CaseApi.join(caseId, {}).then(() => {
+      commit(
+        "notification_backend/addBeNotification",
+        { text: "You have successfully joined the case.", type: "success" },
+        { root: true }
+      )
+    })
+  },
+  getEnabledPlugins() {
+    if (!state.selected.project) {
+      return false
+    }
+    return PluginApi.getAllInstances({
+      filter: JSON.stringify({
+        and: [
+          {
+            model: "PluginInstance",
+            field: "enabled",
+            op: "==",
+            value: "true",
+          },
+          {
+            model: "Project",
+            field: "name",
+            op: "==",
+            value: state.selected.project.name,
+          },
+        ],
+      }),
+      itemsPerPage: 50,
+    }).then((response) => {
+      return response.data.items.reduce((result, item) => {
+        if (item.plugin) {
+          result.push(item.plugin.type)
+        }
+        return result
+      }, [])
+    })
+  },
 }
 
 const mutations = {
   updateField,
+  addCaseCost(state, value) {
+    state.selected.case_costs.push(value)
+  },
+  removeCaseCost(state, idx) {
+    state.selected.case_costs.splice(idx, 1)
+  },
   SET_SELECTED(state, value) {
     state.selected = Object.assign(state.selected, value)
   },
@@ -333,11 +497,20 @@ const mutations = {
   SET_DIALOG_SHOW_EXPORT(state, value) {
     state.dialogs.showExport = value
   },
+  SET_DIALOG_SHOW_HANDOFF(state, value) {
+    state.dialogs.showHandoffDialog = value
+  },
+  SET_DIALOG_SHOW_CLOSED(state, value) {
+    state.dialogs.showClosedDialog = value
+  },
   SET_DIALOG_DELETE(state, value) {
     state.dialogs.showDeleteDialog = value
   },
   SET_DIALOG_ESCALATE(state, value) {
     state.dialogs.showEscalateDialog = value
+  },
+  SET_FILTERS(state, payload) {
+    state.table.options.filters = payload
   },
   RESET_SELECTED(state) {
     state.selected = Object.assign(state.selected, getDefaultSelectedState())
@@ -347,6 +520,15 @@ const mutations = {
   },
   SET_SELECTED_LOADING(state, value) {
     state.selected.loading = value
+  },
+  SET_SELECTED_SAVING(state, value) {
+    state.selected.saving = value
+  },
+  SET_DEFAULT_PROJECT(state, value) {
+    state.default_project = value
+  },
+  SET_CURRENT_USER_ROLE(state, value) {
+    state.current_user_role = value
   },
 }
 

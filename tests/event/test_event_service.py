@@ -1,5 +1,6 @@
 import datetime
 from uuid import uuid4
+from dispatch.enums import EventType
 
 
 def test_get(session, event):
@@ -38,6 +39,7 @@ def test_create(session):
         ended_at=ended_at,
         source=source,
         description=description,
+        type=EventType.other,
     )
     event = create(db_session=session, event_in=event_in)
     assert source == event.source
@@ -58,6 +60,7 @@ def test_update(session, event):
         ended_at=ended_at,
         source=source,
         description=description,
+        type=EventType.other,
     )
     event = update(db_session=session, event=event, event_in=event_in)
     assert event.source == source
@@ -72,7 +75,6 @@ def test_delete(session, event):
 
 def test_log_incident_event(session, incident):
     from dispatch.event.service import log_incident_event
-    from dispatch.event.models import EventCreate
 
     source = "Dispatch event source"
     description = "Dispatch event description"
@@ -85,7 +87,6 @@ def test_log_incident_event(session, incident):
 
 def test_log_case_event(session, case):
     from dispatch.event.service import log_case_event
-    from dispatch.event.models import EventCreate
 
     source = "Dispatch event source"
     description = "Dispatch event description"

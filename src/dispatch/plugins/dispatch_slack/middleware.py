@@ -1,24 +1,33 @@
 import logging
+import json
 from typing import Callable, NamedTuple, Optional
 
 from slack_bolt import BoltContext, BoltRequest
 from slack_sdk.web import WebClient
 from sqlalchemy.orm.session import Session
 
-from dispatch.decorators import timer
 from dispatch.auth import service as user_service
 from dispatch.auth.models import DispatchUser, UserRegister
 from dispatch.conversation import service as conversation_service
-from dispatch.database.core import SessionLocal, refetch_db_session
+from dispatch.database.core import get_session, get_organization_session, refetch_db_session
+from dispatch.decorators import timer
+from dispatch.enums import SubjectNames
 from dispatch.organization import service as organization_service
 from dispatch.participant import service as participant_service
 from dispatch.participant_role.enums import ParticipantRoleType
 from dispatch.plugin import service as plugin_service
-from dispatch.plugins.dispatch_slack import service as dispatch_slack_service
+from dispatch.plugins.dispatch_slack.models import SlackCommandPayload
+from dispatch.plugins.dispatch_slack.exceptions import CommandError
 from dispatch.project import service as project_service
 
-from .exceptions import BotNotPresentError, ContextError, RoleError
-from .models import SubjectMetadata
+from .exceptions import ContextError, RoleError
+from .models import (
+    EngagementMetadata,
+    SubjectMetadata,
+    FormMetadata,
+    IncidentSubjects,
+    CaseSubjects,
+)
 
 log = logging.getLogger(__file__)
 
@@ -27,28 +36,48 @@ Subject = NamedTuple("Subject", subject=SubjectMetadata, db_session=Session)
 
 
 @timer
-def resolve_context_from_conversation(
-    channel_id: str, message_ts: Optional[str] = None
-) -> Optional[Subject]:
-    """Attempts to resolve a conversation based on the channel id or message_ts."""
-    db_session = SessionLocal()
-    organization_slugs = [o.slug for o in organization_service.get_all(db_session=db_session)]
-    db_session.close()
-    for slug in organization_slugs:
-        scoped_db_session = refetch_db_session(slug)
-        conversation = conversation_service.get_by_channel_id_ignoring_channel_type(
-            db_session=scoped_db_session, channel_id=channel_id
-        )
-        if conversation:
-            subject = SubjectMetadata(
-                type="incident",
-                id=conversation.incident_id,
-                organization_slug=slug,
-                project_id=conversation.incident.project_id,
-            )
-            return Subject(subject, db_session=scoped_db_session)
+def resolve_context_from_conversation(channel_id: str, thread_id: str = None) -> Optional[Subject]:
+    """Attempts to resolve a conversation based on the channel id and thread_id."""
+    organization_slugs = []
+    with get_session() as db_session:
+        organization_slugs = [o.slug for o in organization_service.get_all(db_session=db_session)]
 
-        scoped_db_session.close()
+    for slug in organization_slugs:
+        with get_organization_session(slug) as scoped_db_session:
+            conversation = conversation_service.get_by_channel_id_ignoring_channel_type(
+                db_session=scoped_db_session, channel_id=channel_id, thread_id=thread_id
+            )
+
+            if conversation:
+                if conversation.incident:
+                    subject = SubjectMetadata(
+                        type=IncidentSubjects.incident,
+                        id=conversation.incident_id,
+                        organization_slug=slug,
+                        project_id=conversation.incident.project_id,
+                    )
+                else:
+                    subject = SubjectMetadata(
+                        type=CaseSubjects.case,
+                        id=conversation.case_id,
+                        organization_slug=slug,
+                        project_id=conversation.case.project_id,
+                    )
+                return Subject(subject, db_session=scoped_db_session)
+
+
+def select_context_middleware(payload: dict, context: BoltContext, next: Callable) -> None:
+    """Attempt to determine the current context of the selection."""
+    if not payload.get("selected_option"):
+        return next()
+
+    organization_slug, incident_id, *_ = payload["selected_option"]["value"].split("-")
+    subject_data = SubjectMetadata(
+        organization_slug=organization_slug, id=incident_id, type="Incident"
+    )
+
+    context.update({"subject": subject_data})
+    next()
 
 
 def shortcut_context_middleware(context: BoltContext, next: Callable) -> None:
@@ -72,18 +101,60 @@ def button_context_middleware(payload: dict, context: BoltContext, next: Callabl
     next()
 
 
-def action_context_middleware(body: dict, context: BoltContext, next: Callable) -> None:
-    """Attempt to determine the current context of the event."""
-    context.update({"subject": SubjectMetadata.parse_raw(body["view"]["private_metadata"])})
+def engagement_button_context_middleware(
+    payload: dict, context: BoltContext, next: Callable
+) -> None:
+    """Attempt to determine the current context of the event. Payload is populated by
+    the `create_signal_engagement_message` function in `dispatch_slack/case/messages.py`.
+
+    Example Payload:
+        {
+            'action_id': 'signal-engagement-approve',
+            'block_id': 'Zqr+v',
+            'text': {
+                'type': 'plain_text',
+                'text': 'Approve',
+                'emoji': True
+            },
+            'value': '{
+                "id": "5362",
+                "type": "case",
+                "organization_slug":
+                "default", "project_id": "1",
+                "channel_id": "C04KJP0BLUT",
+                "signal_instance_id": "21077511-c53c-4d10-a2eb-998a5c972e09",
+                "engagement_id": 5,
+                "user": "wshel@netflix.com"
+            }',
+            'style': 'primary',
+            'type': 'button', 'action_ts': '1689348164.534992'
+        }
+    """
+    subject_data = EngagementMetadata.parse_raw(payload["value"])
+    context.update({"subject": subject_data})
     next()
 
 
-def message_context_middleware(request: BoltRequest, context: BoltContext, next: Callable) -> None:
-    """Attemps to determine the current context of the event."""
+def action_context_middleware(body: dict, context: BoltContext, next: Callable) -> None:
+    """Attempt to determine the current context of the event."""
+    private_metadata = json.loads(body["view"]["private_metadata"])
+    if private_metadata.get("form_data"):
+        context.update({"subject": FormMetadata(**private_metadata)})
+    else:
+        context.update({"subject": SubjectMetadata(**private_metadata)})
+    next()
+
+
+def message_context_middleware(
+    request: BoltRequest, payload: dict, context: BoltContext, next: Callable
+) -> None:
+    """Attempts to determine the current context of the event."""
     if is_bot(request):
         return context.ack()
 
-    if subject := resolve_context_from_conversation(channel_id=context.channel_id):
+    if subject := resolve_context_from_conversation(
+        channel_id=context.channel_id, thread_id=payload.get("thread_ts")
+    ):
         context.update(subject._asdict())
     else:
         raise ContextError("Unable to determine context for message.")
@@ -91,8 +162,9 @@ def message_context_middleware(request: BoltRequest, context: BoltContext, next:
     next()
 
 
+# TODO should we support reactions for cases?
 def reaction_context_middleware(context: BoltContext, next: Callable) -> None:
-    """Attemps to determine the current context of a reaction event."""
+    """Attempts to determine the current context of a reaction event."""
     if subject := resolve_context_from_conversation(channel_id=context.channel_id):
         context.update(subject._asdict())
     else:
@@ -127,11 +199,16 @@ def restricted_command_middleware(
 
 # filter out member join bot events as the built in slack-bolt doesn't catch these events
 # https://github.com/slackapi/bolt-python/blob/main/slack_bolt/middleware/ignoring_self_events/ignoring_self_events.py#L37
-def is_bot(request: BoltRequest):
+def is_bot(request: BoltRequest) -> bool:
+    body = request.body
+    user = body.get("event", {}).get("user")
+    if user == "USLACKBOT":
+        return True
+
     auth_result = request.context.authorize_result
     user_id = request.context.user_id
-    bot_id = request.body.get("event", {}).get("bot_id")
-    body = request.body
+    bot_id = body.get("event", {}).get("bot_id")
+
     return (
         auth_result is not None
         and (  # noqa
@@ -185,25 +262,49 @@ def user_middleware(
         )
         db_session = refetch_db_session(slug)
 
-    participant = participant_service.get_by_incident_id_and_conversation_id(
-        db_session=db_session, incident_id=context["subject"].id, user_conversation_id=user_id
-    )
+    participant = None
+    # in the case of creating new incidents or cases we don't have a subject yet
+    if context["subject"].id:
+        if context["subject"].type == "incident":
+            participant = participant_service.get_by_incident_id_and_conversation_id(
+                db_session=db_session,
+                incident_id=context["subject"].id,
+                user_conversation_id=user_id,
+            )
+        else:
+            participant = participant_service.get_by_case_id_and_conversation_id(
+                db_session=db_session, case_id=context["subject"].id, user_conversation_id=user_id
+            )
+
+    user = None
     if participant:
-        context["user"] = user_service.get_or_create(
+        user = user_service.get_or_create(
             db_session=db_session,
             organization=context["subject"].organization_slug,
             user_in=UserRegister(email=participant.individual.email),
         )
-        return next()
+    else:
+        user_info = client.users_info(user=user_id).get("user", {})
 
-    email = client.users_info(user=user_id)["user"]["profile"]["email"]
+        if user_info.get("is_bot", False):
+            return context.ack()
 
-    context["user"] = user_service.get_or_create(
-        db_session=db_session,
-        organization=context["subject"].organization_slug,
-        user_in=UserRegister(email=email),
-    )
-    next()
+        email = user_info.get("profile", {}).get("email")
+
+        if not email:
+            raise ContextError("Unable to get user email address.")
+
+        user = user_service.get_or_create(
+            db_session=db_session,
+            organization=context["subject"].organization_slug,
+            user_in=UserRegister(email=email),
+        )
+
+    if not user:
+        raise ContextError("Unable to determine user from context.")
+
+    context["user"] = user
+    return next()
 
 
 def modal_submit_middleware(body: dict, context: BoltContext, next: Callable) -> None:
@@ -252,13 +353,32 @@ def modal_submit_middleware(body: dict, context: BoltContext, next: Callable) ->
 
 
 # NOTE we don't need to handle cases because commands are not available in threads.
-def command_context_middleware(context: BoltContext, payload: dict, next: Callable) -> None:
-    if subject := resolve_context_from_conversation(channel_id=context.channel_id):
-        context.update(subject._asdict())
-    else:
+def command_context_middleware(
+    context: BoltContext,
+    payload: SlackCommandPayload,
+    next: Callable,
+    expected_subject: SubjectNames = SubjectNames.INCIDENT,
+) -> None:
+    subject = resolve_context_from_conversation(channel_id=context.channel_id)
+    if not subject:
         raise ContextError(
-            f"Sorry, we were unable to determine the correct context to run the command `{payload['command']}`. Are you running this command in an incident channel?"
+            f"Sorry, we were unable to determine the correct context to run the command `{payload['command']}`. Are you running this command in a {expected_subject.lower()} channel?"
         )
+
+    if not subject.subject.type == expected_subject.lower():
+        raise CommandError(
+            f"This command is only available with {expected_subject}s. {payload.get('channel_name', 'This channel')} is a {subject.subject.type}."
+        )
+
+    context.update(subject._asdict())
+    next()
+
+
+def add_user_middleware(payload: dict, context: BoltContext, next: Callable):
+    """Attempts to determine the user to add to the incident."""
+    value = payload.get("value")
+    if value:
+        context["users"] = json.loads(value).get("users")
     next()
 
 
@@ -269,8 +389,9 @@ def db_middleware(context: BoltContext, next: Callable):
     else:
         slug = context["subject"].organization_slug
 
-    context["db_session"] = refetch_db_session(slug)
-    next()
+    with get_organization_session(slug) as db_session:
+        context["db_session"] = db_session
+        next()
 
 
 def subject_middleware(context: BoltContext, next: Callable):
@@ -305,42 +426,7 @@ def configuration_middleware(context: BoltContext, next: Callable):
     next()
 
 
-# This middleware has a dependency on configuration_middleware()
-def non_incident_command_middlware(
-    client: WebClient,
-    context: BoltContext,
-    next: Callable,
-):
-    """Attempts to resolve a conversation based on the channel id or message_ts."""
-    # We get the list of public and private conversations the Dispatch bot is a member of
-    public_conversations = dispatch_slack_service.get_conversations_by_user_id(
-        client, context["config"].app_user_slug, type="public"
-    )
-    private_conversations = dispatch_slack_service.get_conversations_by_user_id(
-        client, context["config"].app_user_slug, type="private"
-    )
-
-    public_conversation_names = [c["name"] for c in public_conversations]
-    private_conversation_names = [c["name"] for c in private_conversations]
-
-    # We get the name of conversation where the command was run
-    conversation_name = dispatch_slack_service.get_conversation_name_by_id(
-        client, context.channel_id
-    )
-
-    if (
-        not conversation_name
-        or conversation_name not in public_conversation_names + private_conversation_names  # noqa
-    ):
-        # We let the user know in which public conversations they can run the command
-        context["conversations"] = public_conversations
-        raise BotNotPresentError("User ran a command where the bot is not present.")
-
-    next()
-
-
 def get_default_org_slug() -> str:
-    db_session = SessionLocal()
-    slug = organization_service.get_default(db_session=db_session).slug
-    db_session.close()
+    with get_session() as db_session:
+        slug = organization_service.get_default(db_session=db_session).slug
     return slug

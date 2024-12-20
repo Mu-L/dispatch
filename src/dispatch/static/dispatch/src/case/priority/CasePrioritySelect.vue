@@ -1,45 +1,40 @@
 <template>
   <v-select
-    v-model="case_priority"
+    v-model="selectedPriority"
     :items="items"
-    item-text="name"
+    item-title="name"
     :menu-props="{ maxHeight: '400' }"
     label="Priority"
     return-object
     :loading="loading"
+    :error-messages="show_error"
+    :rules="[is_priority_in_project]"
+    clearable
   >
-    <template v-slot:item="data">
-      <template>
-        <v-list-item-content>
-          <v-list-item-title v-text="data.item.name" />
-          <v-list-item-subtitle
-            style="width: 200px"
-            class="text-truncate"
-            v-text="data.item.description"
-          />
-        </v-list-item-content>
-      </template>
+    <template #item="data">
+      <v-list-item v-bind="data.props" :title="null">
+        <v-list-item-title>{{ data.item.raw.name }}</v-list-item-title>
+        <v-list-item-subtitle>
+          {{ data.item.raw.description }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
   </v-select>
 </template>
 
 <script>
-import { cloneDeep } from "lodash"
-
 import SearchUtils from "@/search/utils"
 import CasePriorityApi from "@/case/priority/api"
 
 export default {
   name: "CasePrioritySelect",
   props: {
-    value: {
+    modelValue: {
       type: Object,
-      default: function () {
-        return {}
-      },
+      default: () => ({}),
     },
     project: {
-      type: [Object],
+      type: Object,
       default: null,
     },
   },
@@ -48,24 +43,55 @@ export default {
     return {
       loading: false,
       items: [],
+      error: null,
+      lastProjectId: null,
+      is_priority_in_project: () => {
+        this.validatePriority()
+        return this.error
+      },
     }
   },
 
   computed: {
-    case_priority: {
+    selectedPriority: {
       get() {
-        return cloneDeep(this.value)
+        if (!this.modelValue) return null
+        if (this.modelValue.id) {
+          return this.items.find((item) => item.id === this.modelValue.id) || null
+        }
+        if (this.modelValue.name) {
+          return this.items.find((item) => item.name === this.modelValue.name) || null
+        }
+        return null
       },
       set(value) {
-        this.$emit("input", value)
+        this.$emit("update:modelValue", value)
+        this.validatePriority()
       },
+    },
+    show_error() {
+      let items_names = this.items.map((item) => item.name)
+      let selected_item = this.selectedPriority?.name || ""
+      if (items_names.includes(selected_item) || selected_item == "") {
+        return null
+      }
+      return "Not a valid case priority"
     },
   },
 
   methods: {
+    validatePriority() {
+      const project_id = this.project?.id || 0
+      const in_project = this.selectedPriority?.project?.id == project_id
+      if (in_project) {
+        this.error = true
+      } else {
+        this.error = "Only priorities in selected project are allowed"
+      }
+    },
     fetchData() {
       this.error = null
-      this.loading = "error"
+      this.loading = true
 
       let filterOptions = {
         sortBy: ["view_order"],
@@ -92,24 +118,35 @@ export default {
 
       filterOptions = SearchUtils.createParametersFromTableOptions(
         { ...filterOptions },
+        "CasePriority",
         enabledFilter
       )
 
-      CasePriorityApi.getAll(filterOptions).then((response) => {
-        this.items = response.data.items
-        this.loading = false
-      })
+      CasePriorityApi.getAll(filterOptions)
+        .then((response) => {
+          this.items = response.data.items
+        })
+        .catch((error) => {
+          console.error("Error fetching case priorities:", error)
+          this.error = "Failed to load case priorities"
+        })
+        .finally(() => {
+          this.loading = false
+        })
+    },
+    resetSelection() {
+      this.$emit("update:modelValue", null)
+    },
+  },
+
+  watch: {
+    project() {
+      this.fetchData()
     },
   },
 
   created() {
     this.fetchData()
-    this.$watch(
-      (vm) => [vm.project],
-      () => {
-        this.fetchData()
-      }
-    )
   },
 }
 </script>

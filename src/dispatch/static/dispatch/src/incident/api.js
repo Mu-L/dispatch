@@ -1,4 +1,5 @@
 import API from "@/api"
+//import { result } from "lodash"
 
 const resource = "incidents"
 
@@ -27,16 +28,16 @@ export default {
     return API.put(`/${resource}/${incidentId}`, payload)
   },
 
-  createReport(incidentId, type, payload) {
-    return API.post(`/${resource}/${incidentId}/report/${type}`, payload)
-  },
-
   bulkUpdate(incidents, payload) {
     return Promise.all(
       incidents.map((incident) => {
         return this.update(incident.id, { ...incident, ...payload })
       })
     )
+  },
+
+  delete(incidentId) {
+    return API.delete(`/${resource}/${incidentId}`)
   },
 
   bulkDelete(incidents) {
@@ -55,7 +56,30 @@ export default {
     return API.post(`/${resource}/${incidentId}/subscribe`, payload)
   },
 
-  delete(incidentId) {
-    return API.delete(`/${resource}/${incidentId}`)
+  createReport(incidentId, type, payload) {
+    return API.post(`/${resource}/${incidentId}/report/${type}`, payload)
+  },
+
+  createNewEvent(incidentId, payload) {
+    return API.post(`/${resource}/${incidentId}/event`, payload)
+  },
+
+  updateEvent(incidentId, payload) {
+    return API.patch(`/${resource}/${incidentId}/event`, payload)
+  },
+
+  deleteEvent(incidentId, event_uuid) {
+    return API.delete(`/${resource}/${incidentId}/event/${event_uuid}`)
+  },
+
+  createAllResources(incidentId, payload) {
+    return API.post(`/${resource}/${incidentId}/resources`, payload)
+  },
+  exportTimeline(incidentId, timeline_filters) {
+    return API.post(`/${resource}/${incidentId}/exportTimeline`, timeline_filters)
+  },
+
+  regenerate(incidentId) {
+    return API.get(`/${resource}/${incidentId}/regenerate`)
   },
 }

@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import List, Optional
-from pydantic import Field
+from typing import List, Optional, Union
+from pydantic import Field, AnyHttpUrl, validator
 
 from sqlalchemy import Column, ForeignKey, Integer, PrimaryKeyConstraint, String, Table
 from sqlalchemy.sql.schema import UniqueConstraint
@@ -10,7 +10,13 @@ from sqlalchemy_utils import TSVectorType
 from dispatch.database.core import Base
 from dispatch.project.models import ProjectRead
 from dispatch.search_filter.models import SearchFilterRead
-from dispatch.models import ContactBase, ContactMixin, DispatchBase, ProjectMixin, PrimaryKey
+from dispatch.models import (
+    ContactBase,
+    ContactMixin,
+    ProjectMixin,
+    PrimaryKey,
+    Pagination,
+)
 
 # Association tables for many to many relationships
 assoc_individual_filters = Table(
@@ -36,6 +42,8 @@ class IndividualContact(Base, ContactMixin, ProjectMixin):
     external_id = Column(String)
 
     events = relationship("Event", backref="individual")
+    service_feedback = relationship("ServiceFeedback", backref="individual")
+
     filters = relationship(
         "SearchFilter", secondary=assoc_individual_filters, backref="individuals"
     )
@@ -46,19 +54,26 @@ class IndividualContact(Base, ContactMixin, ProjectMixin):
         TSVectorType(
             "name",
             "title",
+            "email",
             "company",
             "notes",
-            weights={"name": "A", "title": "B", "company": "C", "notes": "D"},
+            weights={"name": "A", "email": "B", "title": "C", "company": "D"},
         )
     )
 
 
 class IndividualContactBase(ContactBase):
-    weblink: Optional[str] = Field(None, nullable=True)
+    weblink: Union[AnyHttpUrl, None, str] = Field(None, nullable=True)
     mobile_phone: Optional[str] = Field(None, nullable=True)
     office_phone: Optional[str] = Field(None, nullable=True)
     title: Optional[str] = Field(None, nullable=True)
     external_id: Optional[str] = Field(None, nullable=True)
+
+    @validator("weblink")
+    def weblink_validator(cls, v):
+        if v is None or isinstance(v, AnyHttpUrl) or v == "":
+            return v
+        raise ValueError("weblink is not an empty string or a valid weblink")
 
 
 class IndividualContactCreate(IndividualContactBase):
@@ -83,6 +98,5 @@ class IndividualContactReadMinimal(IndividualContactBase):
     updated_at: Optional[datetime] = None
 
 
-class IndividualContactPagination(DispatchBase):
-    total: int
+class IndividualContactPagination(Pagination):
     items: List[IndividualContactRead] = []

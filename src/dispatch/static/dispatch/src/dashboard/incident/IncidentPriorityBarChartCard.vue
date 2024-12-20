@@ -19,7 +19,7 @@ export default {
   name: "IncidentPriorityBarChartCard",
 
   props: {
-    value: {
+    modelValue: {
       type: Object,
       default: function () {
         return {}
@@ -44,7 +44,10 @@ export default {
   },
 
   created: function () {
-    IncidentPriorityApi.getAll().then((response) => {
+    let filterOptions = {
+      itemsPerPage: -1,
+    }
+    IncidentPriorityApi.getAll(filterOptions).then((response) => {
       this.priorities = [
         ...new Set(
           map(
@@ -110,14 +113,14 @@ export default {
     },
     series() {
       let series = DashboardUtils.createCountedSeriesData(
-        this.value,
+        this.modelValue,
         "incident_priority.name",
         this.priorities
       )
       return series
     },
     categoryData() {
-      return Object.keys(this.value)
+      return Object.keys(this.modelValue)
     },
   },
 }

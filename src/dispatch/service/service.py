@@ -8,7 +8,7 @@ from dispatch.project import service as project_service
 from dispatch.project.models import ProjectRead
 from dispatch.search_filter import service as search_filter_service
 
-from .models import Service, ServiceCreate, ServiceUpdate, ServiceRead
+from .models import Service, ServiceCreate, ServiceRead, ServiceUpdate
 
 
 def get(*, db_session, service_id: int) -> Optional[Service]:
@@ -21,6 +21,11 @@ def get_by_external_id(*, db_session, external_id: str) -> Optional[Service]:
     return db_session.query(Service).filter(Service.external_id == external_id).first()
 
 
+def get_all_by_external_ids(*, db_session, external_ids: List[str]) -> Optional[List[Service]]:
+    """Gets a service by external id (e.g. PagerDuty service id) and project id."""
+    return db_session.query(Service).filter(Service.external_id.in_(external_ids)).all()
+
+
 def get_by_name(*, db_session, project_id: int, name: str) -> Optional[Service]:
     """Gets a service by its name."""
     return (
@@ -31,7 +36,7 @@ def get_by_name(*, db_session, project_id: int, name: str) -> Optional[Service]:
     )
 
 
-def get_by_name_or_raise(*, db_session, project_id, service_in=ServiceRead) -> ServiceRead:
+def get_by_name_or_raise(*, db_session, project_id, service_in: ServiceRead) -> ServiceRead:
     """Returns the service specified or raises ValidationError."""
     source = get_by_name(db_session=db_session, project_id=project_id, name=service_in.name)
 
@@ -144,6 +149,18 @@ def get_all_by_project_id_and_status(
         .filter(Service.project_id == project_id)
         .filter(Service.is_active.is_(is_active))
         .order_by(Service.name)
+    )
+
+
+def get_all_by_health_metrics(
+    *, db_session, service_type: str, health_metrics: bool, project_id: int
+) -> List[Optional[Service]]:
+    """Gets all services based on the given health metrics value for a given project."""
+    return (
+        db_session.query(Service)
+        .filter(Service.health_metrics.is_(health_metrics))
+        .filter(Service.project_id == project_id)
+        .all()
     )
 
 

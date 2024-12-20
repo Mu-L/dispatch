@@ -3,46 +3,37 @@
     :items="items"
     :label="label"
     :loading="loading"
-    :search-input.sync="search"
-    @update:search-input="getFilteredData()"
+    v-model:search="search"
+    @update:search="getFilteredData()"
     chips
     clearable
-    deletable-chips
+    closable-chips
     hide-selected
-    item-text="name"
+    item-title="name"
     item-value="id"
     multiple
     no-filter
     v-model="incidents"
   >
-    <template v-slot:no-data>
+    <template #no-data>
       <v-list-item>
-        <v-list-item-content>
-          <v-list-item-title>
-            No incidents matching "
-            <strong>{{ search }}</strong
-            >"
-          </v-list-item-title>
-        </v-list-item-content>
+        <v-list-item-title>
+          No incidents matching "<strong>{{ search }}</strong
+          >"
+        </v-list-item-title>
       </v-list-item>
     </template>
-    <template v-slot:item="data">
-      <template>
-        <v-list-item-content>
-          <v-list-item-title v-text="data.item.name" />
-          <v-list-item-subtitle
-            style="width: 200px"
-            class="text-truncate"
-            v-text="data.item.title"
-          />
-        </v-list-item-content>
-      </template>
+    <template #item="data">
+      <v-list-item v-bind="data.props" :title="null">
+        <v-list-item-title>{{ data.item.raw.name }}</v-list-item-title>
+        <v-list-item-subtitle :title="data.item.raw.title">
+          {{ data.item.raw.title }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
-    <template v-slot:append-item>
+    <template #append-item>
       <v-list-item v-if="more" @click="loadMore()">
-        <v-list-item-content>
-          <v-list-item-subtitle> Load More </v-list-item-subtitle>
-        </v-list-item-content>
+        <v-list-item-subtitle> Load More </v-list-item-subtitle>
       </v-list-item>
     </template>
   </v-combobox>
@@ -57,7 +48,7 @@ import IncidentApi from "@/incident/api"
 export default {
   name: "IncidentFilterCombobox",
   props: {
-    value: {
+    modelValue: {
       type: Array,
       default: function () {
         return []
@@ -81,17 +72,17 @@ export default {
   computed: {
     incidents: {
       get() {
-        return cloneDeep(this.value)
+        return cloneDeep(this.modelValue)
       },
       set(value) {
         this.search = null
-        this._incidents = value.filter((v) => {
+        const incidents = value.filter((v) => {
           if (typeof v === "string") {
             return false
           }
           return true
         })
-        this.$emit("input", this._incidents)
+        this.$emit("update:modelValue", incidents)
       },
     },
   },

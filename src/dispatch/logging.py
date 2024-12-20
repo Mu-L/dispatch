@@ -16,7 +16,7 @@ class LogLevels(DispatchEnum):
 
 def configure_logging():
     log_level = str(LOG_LEVEL).upper()  # cast to string
-    log_levels = [level for level in LogLevels]
+    log_levels = list(LogLevels)
 
     if log_level not in log_levels:
         # we use error as the default log level
@@ -28,3 +28,6 @@ def configure_logging():
         return
 
     logging.basicConfig(level=log_level)
+
+    # sometimes the slack client can be too verbose
+    logging.getLogger("slack_sdk.web.base_client").setLevel(logging.CRITICAL)

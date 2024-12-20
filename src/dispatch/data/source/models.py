@@ -1,6 +1,6 @@
 from typing import Optional, List
 from datetime import datetime
-from pydantic import Field
+from pydantic import Field, AnyHttpUrl
 
 from sqlalchemy import (
     JSON,
@@ -20,7 +20,13 @@ from sqlalchemy import UniqueConstraint
 
 from sqlalchemy_utils import TSVectorType
 from dispatch.database.core import Base
-from dispatch.models import DispatchBase, ProjectMixin, TimeStampMixin, PrimaryKey
+from dispatch.models import (
+    DispatchBase,
+    ProjectMixin,
+    Pagination,
+    TimeStampMixin,
+    PrimaryKey,
+)
 from dispatch.project.models import ProjectRead
 from dispatch.data.source.environment.models import SourceEnvironmentRead
 from dispatch.data.source.data_format.models import SourceDataFormatRead
@@ -96,6 +102,13 @@ class QueryReadMinimal(DispatchBase):
     description: str
 
 
+class Link(DispatchBase):
+    id: Optional[int]
+    name: Optional[str]
+    description: Optional[str]
+    href: Optional[AnyHttpUrl]
+
+
 # Pydantic models
 class SourceBase(DispatchBase):
     name: Optional[str] = Field(None, nullable=False)
@@ -116,7 +129,7 @@ class SourceBase(DispatchBase):
     size: Optional[int] = Field(None, nullable=True)
     external_id: Optional[str] = Field(None, nullable=True)
     aggregated: Optional[bool] = Field(False, nullable=True)
-    links: Optional[List] = []
+    links: Optional[List[Link]] = Field(default_factory=list)
     tags: Optional[List[TagRead]] = []
     incidents: Optional[List[IncidentRead]] = []
     queries: Optional[List[QueryReadMinimal]] = []
@@ -143,6 +156,5 @@ class SourceRead(SourceBase):
     id: PrimaryKey
 
 
-class SourcePagination(DispatchBase):
+class SourcePagination(Pagination):
     items: List[SourceRead]
-    total: int

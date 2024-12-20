@@ -1,10 +1,14 @@
+attrs==22.1.0
 black
 click
 coverage
 devtools
+easydict
 factory-boy
 faker
-flake8
 ipython
-pytest
+pre-commit
+pytest==7.4.4
+pytest-mock
+ruff
 vulture

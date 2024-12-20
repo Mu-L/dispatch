@@ -1,25 +1,26 @@
 import calendar
-import json
-import logging
-from datetime import date
-from typing import List
-
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+import json
+import logging
+from typing import Annotated, List
 from starlette.requests import Request
+from sqlalchemy.exc import IntegrityError
 
-from dispatch.auth.models import DispatchUser
 from dispatch.auth.permissions import (
     IncidentEditPermission,
     IncidentJoinOrSubscribePermission,
     IncidentViewPermission,
     PermissionsDependency,
+    IncidentEventPermission,
 )
-from dispatch.auth.service import get_current_user
+from dispatch.auth.service import CurrentUser
 from dispatch.common.utils.views import create_pydantic_include
-from dispatch.database.core import get_db
-from dispatch.database.service import common_parameters, search_filter_sort_paginate
+from dispatch.database.core import DbSession
+from dispatch.database.service import CommonParameters, search_filter_sort_paginate
+from dispatch.event import flows as event_flows
+from dispatch.event.models import EventUpdate, EventCreateMinimal
 from dispatch.incident.enums import IncidentStatus
 from dispatch.individual.models import IndividualContactRead
 from dispatch.models import OrganizationSlug, PrimaryKey
@@ -29,11 +30,13 @@ from dispatch.report.models import ExecutiveReportCreate, TacticalReportCreate
 
 from .flows import (
     incident_add_or_reactivate_participant_flow,
-    incident_add_participant_to_tactical_group_flow,
     incident_create_closed_flow,
     incident_create_flow,
     incident_create_stable_flow,
+    incident_delete_flow,
+    incident_subscribe_participant_flow,
     incident_update_flow,
+    incident_create_resources_flow,
 )
 from .metrics import create_incident_metric_query, make_forecast
 from .models import (
@@ -44,33 +47,34 @@ from .models import (
     IncidentRead,
     IncidentUpdate,
 )
-from .service import create, delete, get, update
+from .service import create, delete, get, update, generate_incident_summary
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def get_current_incident(*, db_session: Session = Depends(get_db), request: Request) -> Incident:
+def get_current_incident(db_session: DbSession, request: Request) -> Incident:
     """Fetches incident or returns a 404."""
     incident = get(db_session=db_session, incident_id=request.path_params["incident_id"])
     if not incident:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=[{"msg": "An incident with this id does not existt."}],
+            detail=[{"msg": "An incident with this id does not exist."}],
         )
     return incident
 
 
+CurrentIncident = Annotated[Incident, Depends(get_current_incident)]
+
+
 @router.get("", summary="Retrieve a list of incidents.")
 def get_incidents(
-    *,
-    common: dict = Depends(common_parameters),
+    common: CommonParameters,
     include: List[str] = Query([], alias="include[]"),
     expand: bool = Query(default=False),
 ):
     """Retrieves a list of incidents."""
-    print(expand)
     pagination = search_filter_sort_paginate(model="Incident", **common)
 
     if expand:
@@ -97,10 +101,9 @@ def get_incidents(
     dependencies=[Depends(PermissionsDependency([IncidentViewPermission]))],
 )
 def get_incident(
-    *,
     incident_id: PrimaryKey,
-    db_session: Session = Depends(get_db),
-    current_incident: Incident = Depends(get_current_incident),
+    db_session: DbSession,
+    current_incident: CurrentIncident,
 ):
     """Retrieves the details of a single incident."""
     return current_incident
@@ -108,11 +111,10 @@ def get_incident(
 
 @router.post("", response_model=IncidentRead, summary="Creates a new incident.")
 def create_incident(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     organization: OrganizationSlug,
     incident_in: IncidentCreate,
-    current_user: DispatchUser = Depends(get_current_user),
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Creates a new incident."""
@@ -138,6 +140,26 @@ def create_incident(
     return incident
 
 
+@router.post(
+    "/{incident_id}/resources",
+    response_model=IncidentRead,
+    summary="Creates resources for an existing incident.",
+    dependencies=[Depends(PermissionsDependency([IncidentViewPermission]))],
+)
+def create_incident_resources(
+    organization: OrganizationSlug,
+    incident_id: PrimaryKey,
+    current_incident: CurrentIncident,
+    background_tasks: BackgroundTasks,
+):
+    """Creates resources for an existing incident."""
+    background_tasks.add_task(
+        incident_create_resources_flow, organization_slug=organization, incident_id=incident_id
+    )
+
+    return current_incident
+
+
 @router.put(
     "/{incident_id}",
     response_model=IncidentRead,
@@ -145,13 +167,12 @@ def create_incident(
     dependencies=[Depends(PermissionsDependency([IncidentEditPermission]))],
 )
 def update_incident(
-    *,
-    db_session: Session = Depends(get_db),
-    current_incident: Incident = Depends(get_current_incident),
+    db_session: DbSession,
+    current_incident: CurrentIncident,
     organization: OrganizationSlug,
     incident_id: PrimaryKey,
     incident_in: IncidentUpdate,
-    current_user: DispatchUser = Depends(get_current_user),
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Updates an existing incident."""
@@ -175,18 +196,50 @@ def update_incident(
     return incident
 
 
+@router.delete(
+    "/{incident_id}",
+    response_model=None,
+    summary="Deletes an incident and its external resources.",
+    dependencies=[Depends(PermissionsDependency([IncidentEditPermission]))],
+)
+def delete_incident(
+    incident_id: PrimaryKey,
+    db_session: DbSession,
+    current_incident: CurrentIncident,
+):
+    """Deletes an incident and its external resources."""
+    # we run the incident delete flow
+    incident_delete_flow(incident=current_incident, db_session=db_session)
+
+    # we delete the internal incident
+    try:
+        delete(incident_id=current_incident.id, db_session=db_session)
+    except IntegrityError as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=[
+                {
+                    "msg": (
+                        f"Incident {current_incident.name} could not be deleted. Make sure the incident has no "
+                        "relationships to other incidents or cases before deleting it.",
+                    )
+                }
+            ],
+        ) from None
+
+
 @router.post(
     "/{incident_id}/join",
     summary="Adds an individual to an incident.",
     dependencies=[Depends(PermissionsDependency([IncidentJoinOrSubscribePermission]))],
 )
 def join_incident(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     organization: OrganizationSlug,
     incident_id: PrimaryKey,
-    current_incident: Incident = Depends(get_current_incident),
-    current_user: DispatchUser = Depends(get_current_user),
+    current_incident: CurrentIncident,
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Adds an individual to an incident."""
@@ -204,17 +257,16 @@ def join_incident(
     dependencies=[Depends(PermissionsDependency([IncidentJoinOrSubscribePermission]))],
 )
 def subscribe_to_incident(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     organization: OrganizationSlug,
     incident_id: PrimaryKey,
-    current_incident: Incident = Depends(get_current_incident),
-    current_user: DispatchUser = Depends(get_current_user),
+    current_incident: CurrentIncident,
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Subscribes an individual to an incident."""
     background_tasks.add_task(
-        incident_add_participant_to_tactical_group_flow,
+        incident_subscribe_participant_flow,
         current_user.email,
         incident_id=current_incident.id,
         organization_slug=organization,
@@ -227,13 +279,12 @@ def subscribe_to_incident(
     dependencies=[Depends(PermissionsDependency([IncidentEditPermission]))],
 )
 def create_tactical_report(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     organization: OrganizationSlug,
     incident_id: PrimaryKey,
     tactical_report_in: TacticalReportCreate,
-    current_user: DispatchUser = Depends(get_current_user),
-    current_incident: Incident = Depends(get_current_incident),
+    current_user: CurrentUser,
+    current_incident: CurrentIncident,
     background_tasks: BackgroundTasks,
 ):
     """Creates a tactical report."""
@@ -252,13 +303,12 @@ def create_tactical_report(
     dependencies=[Depends(PermissionsDependency([IncidentEditPermission]))],
 )
 def create_executive_report(
-    *,
-    db_session: Session = Depends(get_db),
+    db_session: DbSession,
     organization: OrganizationSlug,
     incident_id: PrimaryKey,
-    current_incident: Incident = Depends(get_current_incident),
+    current_incident: CurrentIncident,
     executive_report_in: ExecutiveReportCreate,
-    current_user: DispatchUser = Depends(get_current_user),
+    current_user: CurrentUser,
     background_tasks: BackgroundTasks,
 ):
     """Creates an executive report."""
@@ -271,20 +321,112 @@ def create_executive_report(
     )
 
 
-@router.delete(
-    "/{incident_id}",
-    response_model=None,
-    summary="Delete an incident.",
-    dependencies=[Depends(PermissionsDependency([IncidentEditPermission]))],
+@router.post(
+    "/{incident_id}/event",
+    summary="Creates a custom event.",
+    dependencies=[Depends(PermissionsDependency([IncidentEventPermission]))],
 )
-def delete_incident(
-    *,
+def create_custom_event(
+    db_session: DbSession,
+    organization: OrganizationSlug,
     incident_id: PrimaryKey,
-    db_session: Session = Depends(get_db),
-    current_incident: Incident = Depends(get_current_incident),
+    current_incident: CurrentIncident,
+    event_in: EventCreateMinimal,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ):
-    """Deletes an incident."""
-    delete(db_session=db_session, incident_id=current_incident.id)
+    event_in.details.update({"created_by": current_user.email, "added_on": str(datetime.utcnow())})
+    """Creates a custom event."""
+    background_tasks.add_task(
+        event_flows.log_incident_event,
+        user_email=current_user.email,
+        incident_id=current_incident.id,
+        event_in=event_in,
+        organization_slug=organization,
+    )
+
+
+@router.patch(
+    "/{incident_id}/event",
+    summary="Updates a custom event.",
+    dependencies=[Depends(PermissionsDependency([IncidentEventPermission]))],
+)
+def update_custom_event(
+    db_session: DbSession,
+    organization: OrganizationSlug,
+    incident_id: PrimaryKey,
+    current_incident: CurrentIncident,
+    event_in: EventUpdate,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
+):
+    if event_in.details:
+        event_in.details.update(
+            {
+                **event_in.details,
+                "updated_by": current_user.email,
+                "updated_on": str(datetime.utcnow()),
+            }
+        )
+    else:
+        event_in.details = {"updated_by": current_user.email, "updated_on": str(datetime.utcnow())}
+    """Updates a custom event."""
+    background_tasks.add_task(
+        event_flows.update_incident_event,
+        event_in=event_in,
+        organization_slug=organization,
+    )
+
+
+@router.post(
+    "/{incident_id}/exportTimeline",
+    summary="Exports timeline events.",
+    dependencies=[Depends(PermissionsDependency([IncidentEventPermission]))],
+)
+def export_timeline_event(
+    db_session: DbSession,
+    organization: OrganizationSlug,
+    incident_id: PrimaryKey,
+    current_incident: CurrentIncident,
+    timeline_filters: dict,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
+):
+    try:
+        event_flows.export_timeline(
+            timeline_filters=timeline_filters,
+            incident_id=incident_id,
+            organization_slug=organization,
+            db_session=db_session,
+        )
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=[{"msg": (f"{str(e)}.",)}],
+        ) from e
+
+
+@router.delete(
+    "/{incident_id}/event/{event_uuid}",
+    summary="Deletes a custom event.",
+    dependencies=[Depends(PermissionsDependency([IncidentEventPermission]))],
+)
+def delete_custom_event(
+    db_session: DbSession,
+    organization: OrganizationSlug,
+    incident_id: PrimaryKey,
+    current_incident: CurrentIncident,
+    event_uuid: str,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
+):
+    """Deletes a custom event."""
+    background_tasks.add_task(
+        event_flows.delete_incident_event,
+        event_uuid=event_uuid,
+        organization_slug=organization,
+    )
 
 
 def get_month_range(relative):
@@ -298,9 +440,8 @@ def get_month_range(relative):
 
 @router.get("/metric/forecast", summary="Gets incident forecast data.")
 def get_incident_forecast(
-    *,
-    db_session: Session = Depends(get_db),
-    common: dict = Depends(common_parameters),
+    db_session: DbSession,
+    common: CommonParameters,
 ):
     """Gets incident forecast data."""
     categories = []
@@ -357,3 +498,18 @@ def get_incident_forecast(
             {"name": "Actual", "data": actual[1:]},
         ],
     }
+
+
+@router.get(
+    "/{incident_id}/regenerate",
+    summary="Regenerates incident sumamary",
+    dependencies=[Depends(PermissionsDependency([IncidentEventPermission]))],
+)
+def generate_summary(
+    db_session: DbSession,
+    current_incident: CurrentIncident,
+):
+    return generate_incident_summary(
+        db_session=db_session,
+        incident=current_incident,
+    )

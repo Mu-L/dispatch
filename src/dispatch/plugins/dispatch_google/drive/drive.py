@@ -5,20 +5,21 @@
     :license: Apache, see LICENSE for more details.
 .. moduleauthor:: Kevin Glisson <kglisson@netflix.com>
 """
+
 import functools
 import io
 import json
 import logging
 from typing import Any, List
-
 from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+from http import HTTPStatus
+from ssl import SSLError
 from tenacity import TryAgain, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from dispatch.enums import DispatchEnum
-
 
 log = logging.getLogger(__name__)
 
@@ -82,26 +83,35 @@ def paginated(data_key):
     return decorator
 
 
-# google sometimes has transient errors
 @retry(
     stop=stop_after_attempt(5),
     retry=retry_if_exception_type(TryAgain),
     wait=wait_exponential(multiplier=1, min=2, max=5),
 )
 def make_call(client: Any, func: Any, propagate_errors: bool = False, **kwargs):
-    """Make an Google client api call."""
+    """Makes a Google API call."""
     try:
         return getattr(client, func)(**kwargs).execute()
     except HttpError as e:
-        if e.resp.status in [300, 429, 500, 502, 503, 504]:
-            log.debug("Google encountered an error retrying...")
-            raise TryAgain
+        if e.resp.status in [
+            HTTPStatus.MULTIPLE_CHOICES,
+            HTTPStatus.TOO_MANY_REQUESTS,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            HTTPStatus.BAD_GATEWAY,
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.GATEWAY_TIMEOUT,
+        ]:
+            log.debug("We encountered an HTTP error. Retrying...")
+            raise TryAgain from None
 
         if propagate_errors:
-            raise HttpError
+            raise HttpError from None
 
-        errors = json.loads(e.content.decode())
-        raise Exception(f"Request failed. Errors: {errors}")
+        error = json.loads(e.content.decode())
+        raise Exception(f"Google request failed. Error: {error}") from None
+    except SSLError as e:
+        log.debug("We encountered an SSL error. Error: {e}")
+        raise Exception(f"Google request failed. Error: {e}") from None
 
 
 @retry(wait=wait_exponential(multiplier=1, max=10))
@@ -110,8 +120,13 @@ def upload_chunk(request: Any):
     try:
         return request.next_chunk()
     except HttpError as e:
-        if e.resp.status in [500, 502, 503, 504]:
-            # Call next_chunk() agai, but use an exponential backoff for repeated errors.
+        if e.resp.status in [
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            HTTPStatus.BAD_GATEWAY,
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.GATEWAY_TIMEOUT,
+        ]:
+            # Call next_chunk() again, but use an exponential backoff for repeated errors.
             raise e
 
 
@@ -155,8 +170,8 @@ def download_google_document(client: Any, file_id: str, mime_type: str = "text/p
             _, response = downloader.next_chunk()
         return fp.getvalue().decode("utf-8")
     except (HttpError, OSError):
-        # Do no retry. Log the error fail.
-        raise Exception(f"Failed to export the file. Id: {file_id} MimeType: {mime_type}")
+        # Do no retry and raise exception
+        raise Exception(f"Failed to export the file. Id: {file_id} MimeType: {mime_type}") from None
 
 
 def create_file(
@@ -185,8 +200,9 @@ def create_file(
         supportsAllDrives=True,
     )
 
-    for member in members:
-        add_permission(client, member, file_data["id"], role, "user")
+    if members:
+        for member in members:
+            add_permission(client, member, file_data["id"], role, "user")
 
     return file_data
 
@@ -260,8 +276,11 @@ def copy_file(client: Any, folder_id: str, file_id: str, new_file_name: str):
 
 
 def delete_file(client: Any, file_id: str):
-    """Deletes a folder or file from a Google Drive."""
-    return make_call(client.files(), "delete", fileId=file_id, supportsAllDrives=True)
+    """Moves a folder or file to Trash in a Google Drive."""
+    property = {"trashed": True}
+    return make_call(
+        client.files(), "update", fileId=file_id, supportsAllDrives=True, body=property
+    )
 
 
 def mark_as_readonly(

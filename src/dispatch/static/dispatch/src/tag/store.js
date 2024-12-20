@@ -12,6 +12,7 @@ const getDefaultSelectedState = () => {
     uri: null,
     id: null,
     description: "Generic tag",
+    external_id: null,
     project: null,
     created_at: null,
     discoverable: null,
@@ -36,7 +37,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["name"],
       descending: [false],
       filters: {

@@ -34,7 +34,7 @@ instance.interceptors.request.use(
 
 instance.interceptors.request.use(function (config) {
   if (!config.url.includes("organization")) {
-    let currentOrganization = store.state.route.params.organization || null
+    let currentOrganization = router.currentRoute.value.params.organization || "default"
 
     if (currentOrganization) {
       config.url = `${currentOrganization}${config.url}`
@@ -71,7 +71,7 @@ instance.interceptors.response.use(
           "notification_backend/addBeNotification",
           {
             text: errorText,
-            type: "error",
+            type: "exception",
           },
           { root: true }
         )
@@ -83,7 +83,7 @@ instance.interceptors.response.use(
           "notification_backend/addBeNotification",
           {
             text: errorText,
-            type: "error",
+            type: "exception",
           },
           { root: true }
         )
@@ -95,23 +95,28 @@ instance.interceptors.response.use(
           "notification_backend/addBeNotification",
           {
             text: errorText,
-            type: "error",
+            type: "exception",
           },
           { root: true }
         )
       }
 
       if (err.response.status == 500) {
-        let errorText = err.response.data.detail.map(({ msg }) => msg).join(" ")
+        let errorText = ""
+        if (err.response.data.detail) {
+          errorText = err.response.data.detail.map(({ msg }) => msg).join(" ")
+        }
+
         if (errorText.length == 0) {
           errorText =
-            "Something has gone wrong, please retry or let your admin know that you received this error."
+            "Something has gone wrong. Please, retry or let your admin know that you received this error."
         }
+
         store.commit(
           "notification_backend/addBeNotification",
           {
             text: errorText,
-            type: "error",
+            type: "exception",
           },
           { root: true }
         )

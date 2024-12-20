@@ -15,6 +15,13 @@ const getDefaultSelectedState = () => {
     business_year_hours: 2080,
     owner_email: null,
     owner_conversation: null,
+    enabled: null,
+    storage_folder_one: null,
+    storage_folder_two: null,
+    storage_use_folder_one_as_primary: false,
+    storage_use_title: false,
+    allow_self_join: null,
+    select_commander_visibility: null,
   }
 }
 
@@ -34,7 +41,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["name"],
       descending: [false],
     },

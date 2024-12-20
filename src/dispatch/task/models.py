@@ -15,13 +15,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql.schema import UniqueConstraint
 from sqlalchemy_utils import TSVectorType
 
 from dispatch.database.core import Base
-from dispatch.incident.models import IncidentReadMinimal
-from dispatch.models import DispatchBase, ResourceBase, ResourceMixin, PrimaryKey
+from dispatch.incident.models import IncidentReadBasic
+from dispatch.models import ResourceBase, ResourceMixin, PrimaryKey, Pagination
 from dispatch.participant.models import ParticipantRead, ParticipantUpdate
 from dispatch.project.models import ProjectRead
+from dispatch.ticket.models import TicketRead
 
 from .enums import TaskSource, TaskStatus, TaskPriority
 
@@ -47,6 +49,7 @@ assoc_task_assignees = Table(
 
 
 class Task(Base, ResourceMixin):
+    __table_args__ = (UniqueConstraint("resource_id", "incident_id"),)
     id = Column(Integer, primary_key=True)
     resolved_at = Column(DateTime)
     resolve_by = Column(DateTime, default=default_resolution_time)
@@ -63,6 +66,7 @@ class Task(Base, ResourceMixin):
     priority = Column(String, default=TaskPriority.low)
     status = Column(String, default=TaskStatus.open)
     reminders = Column(Boolean, default=True)
+    ticket = relationship("Ticket", uselist=False, backref="task", cascade="all, delete-orphan")
 
     search_vector = Column(
         TSVectorType(
@@ -91,7 +95,7 @@ class TaskBase(ResourceBase):
     created_at: Optional[datetime]
     creator: Optional[ParticipantRead]
     description: Optional[str] = Field(None, nullable=True)
-    incident: IncidentReadMinimal
+    incident: IncidentReadBasic
     owner: Optional[ParticipantRead]
     priority: Optional[str] = Field(None, nullable=True)
     resolve_by: Optional[datetime]
@@ -119,8 +123,8 @@ class TaskUpdate(TaskBase):
 class TaskRead(TaskBase):
     id: PrimaryKey
     project: Optional[ProjectRead]
+    ticket: Optional[TicketRead] = None
 
 
-class TaskPagination(DispatchBase):
-    total: int
+class TaskPagination(Pagination):
     items: List[TaskRead] = []

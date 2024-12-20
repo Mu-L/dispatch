@@ -1,58 +1,56 @@
 <template>
-  <v-combobox
+  <v-select
     :items="items"
     :label="label"
     :loading="loading"
     :menu-props="{ maxHeight: '400' }"
-    :search-input.sync="search"
-    @update:search-input="getFilteredData({ q: $event })"
-    item-text="name"
+    item-title="display_name"
     item-value="id"
     v-model="project"
+    return-object
   >
-    <template v-slot:no-data>
+    <template #no-data>
       <v-list-item>
-        <v-list-item-content>
-          <v-list-item-title>
-            No projects matching
-            <strong>"{{ search }}"</strong>
-          </v-list-item-title>
-        </v-list-item-content>
+        <v-list-item-title>
+          No projects matching
+          <strong>"{{ search }}"</strong>
+        </v-list-item-title>
       </v-list-item>
     </template>
-    <template v-slot:item="data">
-      <v-list-item-content>
-        <v-list-item-title v-text="data.item.name" />
-        <v-list-item-subtitle
-          style="width: 200px"
-          class="text-truncate"
-          v-text="data.item.description"
-        />
-      </v-list-item-content>
+    <template #item="data">
+      <v-list-item v-bind="data.props" :title="null">
+        <v-list-item-title>{{ data.item.raw.display_name }}</v-list-item-title>
+        <v-list-item-subtitle :title="data.item.raw.description">
+          {{ data.item.raw.description }}
+        </v-list-item-subtitle>
+      </v-list-item>
     </template>
-    <template v-slot:append-item>
+    <template #append-item>
       <v-list-item v-if="more" @click="loadMore()">
-        <v-list-item-content>
-          <v-list-item-subtitle> Load More </v-list-item-subtitle>
-        </v-list-item-content>
+        <v-list-item-subtitle> Load More </v-list-item-subtitle>
       </v-list-item>
     </template>
-  </v-combobox>
+  </v-select>
 </template>
 
 <script>
 import { cloneDeep, debounce } from "lodash"
 import ProjectApi from "@/project/api"
+import SearchUtils from "@/search/utils"
 
 export default {
   name: "ProjectSelect",
 
   props: {
-    value: {
+    modelValue: {
       type: Object,
       default: function () {
         return {}
       },
+    },
+    excludeDisabled: {
+      type: Boolean,
+      default: false,
     },
     label: {
       type: String,
@@ -73,10 +71,16 @@ export default {
   computed: {
     project: {
       get() {
-        return cloneDeep(this.value)
+        let projects = cloneDeep(this.modelValue)
+        if (this.excludeDisabled && projects && Array.isArray(projects) && projects.length > 0) {
+          projects = projects.filter((project) => {
+            return project.enabled
+          })
+        }
+        return projects
       },
       set(value) {
-        this.$emit("input", value)
+        this.$emit("update:modelValue", value)
       },
     },
   },
@@ -90,21 +94,25 @@ export default {
       this.error = null
       this.loading = "error"
       let filterOptions = {
-        q: this.search,
+        q: "",
         itemsPerPage: this.numItems,
-        sortBy: ["name"],
+        sortBy: ["display_name"],
         descending: [false],
       }
 
+      if (this.excludeDisabled) {
+        filterOptions = {
+          filters: {
+            enabled: [true],
+          },
+          ...filterOptions,
+        }
+      }
+
+      filterOptions = SearchUtils.createParametersFromTableOptions({ ...filterOptions })
+
       ProjectApi.getAll(filterOptions).then((response) => {
         this.items = response.data.items
-
-        if (this.project) {
-          // check to see if the current selection is available in the list and if not we add it
-          if (!this.items.find((match) => match.id === this.project.id)) {
-            this.items = [this.project].concat(this.items)
-          }
-        }
 
         this.total = response.data.total
 

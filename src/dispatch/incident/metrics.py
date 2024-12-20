@@ -1,22 +1,19 @@
-import math
+import json
 import logging
-from typing import List
-from itertools import groupby
-
-from datetime import date
-
+import math
 from calendar import monthrange
+from datetime import date
+from itertools import groupby
+from typing import List
 
 import pandas as pd
+from sqlalchemy import and_
 from statsmodels.tsa.api import ExponentialSmoothing
 
-from sqlalchemy import and_
-
-from dispatch.database.service import apply_filters, apply_filter_specific_joins
+from dispatch.database.service import apply_filter_specific_joins, apply_filters
 from dispatch.incident.type.models import IncidentType
 
 from .models import Incident
-
 
 log = logging.getLogger(__name__)
 
@@ -35,12 +32,14 @@ def create_incident_metric_query(
     db_session,
     end_date: date,
     start_date: date = None,
-    filter_spec: List[dict] = None,
+    filter_spec: List[dict] | str | None = None,
 ):
     """Fetches eligible incidents."""
     query = db_session.query(Incident)
 
     if filter_spec:
+        if isinstance(filter_spec, str):
+            filter_spec = json.loads(filter_spec)
         query = apply_filter_specific_joins(Incident, filter_spec, query)
         query = apply_filters(query, filter_spec)
 
@@ -77,7 +76,7 @@ def make_forecast(incidents: List[Incident]):
     dataframe.drop("ds", inplace=True, axis=1)
 
     # fill periods without incidents with 0
-    idx = pd.date_range(dataframe.index[0], dataframe.index[-1], freq="M")
+    idx = pd.date_range(dataframe.index[0], dataframe.index[-1], freq="ME")
     dataframe.index = pd.DatetimeIndex(dataframe.index)
     dataframe = dataframe.reindex(idx, fill_value=0)
 
@@ -92,13 +91,13 @@ def make_forecast(incidents: List[Incident]):
             log.warning(f"Issue forecasting incidents: {e}")
             return [], []
         forecast = forecaster.forecast(12)
-        forecast_df = pd.DataFrame({"ds": forecast.index.astype("str"), "yhat": forecast.values})
+        forecast_df = pd.DataFrame({"ds": forecast.index.astype("str"), "that": forecast.values})
 
         forecast_data = forecast_df.to_dict("series")
 
         # drop day data
         categories = [d[:-3] for d in forecast_data["ds"]]
-        predicted_counts = [max(math.ceil(x), 0) for x in list(forecast_data["yhat"])]
+        predicted_counts = [max(math.ceil(x), 0) for x in list(forecast_data["that"])]
         return categories, predicted_counts
     else:
         return [], []

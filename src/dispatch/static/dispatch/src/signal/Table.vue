@@ -1,12 +1,11 @@
 <template>
   <v-container fluid>
     <new-edit-dialog />
-    <delete-dialog />
     <v-row no-gutters>
       <v-col>
-        <v-alert dismissible icon="mdi-school" prominent text type="info"
-          >Signal definitions determine how a signal is processed. Allowing you to map case types,
-          supression and duplication rules for each signal.
+        <v-alert closable icon="mdi-school" prominent text type="info">
+          Signal definitions determine how a signal is processed. Allowing you to map case types,
+          snooze and duplication rules for each signal.
         </v-alert>
       </v-col>
     </v-row>
@@ -15,65 +14,72 @@
         <settings-breadcrumbs v-model="project" />
       </v-col>
       <v-col class="text-right">
-        <v-btn color="info" class="mr-2" @click="createEditShow()"> New </v-btn>
+        <v-btn color="info" class="ml-2" @click="createEditShow()"> New </v-btn>
       </v-col>
     </v-row>
     <v-row no-gutters>
       <v-col>
-        <v-card elevation="0">
+        <v-card variant="flat">
           <v-card-title>
             <v-text-field
               v-model="q"
-              append-icon="search"
+              append-inner-icon="mdi-magnify"
               label="Search"
               single-line
               hide-details
               clearable
             />
           </v-card-title>
-          <v-data-table
+          <v-data-table-server
             :headers="headers"
             :items="items"
-            :server-items-length="total"
-            :page.sync="page"
-            :items-per-page.sync="itemsPerPage"
-            :sort-by.sync="sortBy"
-            :sort-desc.sync="descending"
+            :items-length="total || 0"
+            v-model:page="page"
+            v-model:items-per-page="itemsPerPage"
+            v-model:sort-by="sortBy"
+            v-model:sort-desc="descending"
             :loading="loading"
             loading-text="Loading... Please wait"
           >
-            <template v-slot:item.status="{ item }">
-              <case-status :status="item.status" :id="item.id" />
+            <template #item.create_case="{ value }">
+              <v-checkbox-btn :model-value="value" disabled />
             </template>
-            <template v-slot:item.project.name="{ item }">
-              <v-chip small :color="item.project.color" text-color="white">
-                {{ item.project.name }}
+            <template #item.enabled="{ value }">
+              <v-checkbox-btn :model-value="value" disabled />
+            </template>
+            <template #item.status="{ item, value }">
+              <case-status :status="value" :id="item.id" />
+            </template>
+            <template #item.project.display_name="{ item }">
+              <v-chip size="small" :color="item.project.color">
+                {{ item.project.display_name }}
               </v-chip>
             </template>
-            <template v-slot:item.case_type="{ item }">
-              <v-chip v-if="item.case_type" small color="info" text-color="white">
+            <template #item.case_type="{ item }">
+              <v-chip v-if="item.case_type" size="small" color="info">
                 {{ item.case_type.name }}
               </v-chip>
             </template>
-            <template v-slot:item.case_priority="{ item }">
-              <v-chip
-                v-if="item.case_priority"
-                small
-                :color="item.case_priority.color"
-                text-color="white"
-              >
+            <template #item.case_priority="{ item }">
+              <v-chip v-if="item.case_priority" size="small" :color="item.case_priority.color">
                 {{ item.case_priority.name }}
               </v-chip>
             </template>
-            <template v-slot:item.external_url="{ item }">
-              <v-btn v-if="item.external_url" :href="item.external_url" target="_blank" icon>
+            <template #item.external_url="{ item }">
+              <v-btn
+                v-if="item.external_url"
+                :href="item.external_url"
+                target="_blank"
+                icon
+                variant="text"
+              >
                 <v-icon>mdi-open-in-new</v-icon>
               </v-btn>
             </template>
-            <template v-slot:item.data-table-actions="{ item }">
-              <v-menu bottom left>
-                <template v-slot:activator="{ on }">
-                  <v-btn icon v-on="on">
+            <template #item.data-table-actions="{ item }">
+              <v-menu location="right" origin="overlap">
+                <template #activator="{ props }">
+                  <v-btn icon variant="text" v-bind="props">
                     <v-icon>mdi-dots-vertical</v-icon>
                   </v-btn>
                 </template>
@@ -81,13 +87,10 @@
                   <v-list-item @click="createEditShow(item)">
                     <v-list-item-title>View / Edit</v-list-item-title>
                   </v-list-item>
-                  <v-list-item @click="removeShow(item)">
-                    <v-list-item-title>Delete</v-list-item-title>
-                  </v-list-item>
                 </v-list>
               </v-menu>
             </template>
-          </v-data-table>
+          </v-data-table-server>
         </v-card>
       </v-col>
     </v-row>
@@ -97,40 +100,35 @@
 <script>
 import { mapFields } from "vuex-map-fields"
 import { mapActions } from "vuex"
-
-import RouterUtils from "@/router/utils"
-import NewEditDialog from "@/signal/NewEditSheet.vue"
-import DeleteDialog from "@/signal/DeleteDialog.vue"
+import NewEditDialog from "@/signal/NewEditDialog.vue"
 
 export default {
   name: "SignalTable",
-
-  components: { NewEditDialog, DeleteDialog },
-
+  components: { NewEditDialog },
   props: {
     name: {
       type: String,
       default: null,
     },
   },
-
   data() {
     return {
       headers: [
-        { text: "Name", value: "name", align: "left", width: "10%" },
-        { text: "Variant", value: "variant", sortable: true },
-        { text: "Description", value: "description", sortable: false },
-        { text: "Project", value: "project.name", sortable: true },
-        { text: "Owner", value: "owner" },
-        { text: "Case Type", value: "case_type" },
-        { text: "Case Priority", value: "case_priority" },
-        { text: "", value: "external_url", sortable: false },
-        { text: "", value: "data-table-actions", sortable: false, align: "end" },
+        { title: "Name", value: "name", align: "left", width: "10%" },
+        { title: "Variant", value: "variant", sortable: true },
+        { title: "Description", value: "description", sortable: false },
+        { title: "Enabled", value: "enabled", sortable: true },
+        { title: "Create Case", value: "create_case", sortable: true, width: "100px" },
+        { title: "Owner", value: "owner" },
+        { title: "Lifecycle", value: "lifecycle" },
+        { title: "Case Type", value: "case_type" },
+        { title: "Case Priority", value: "case_priority" },
+        { title: "External URL", value: "external_url", sortable: false },
+        { title: "", key: "data-table-actions", sortable: false, align: "end" },
       ],
       showEditSheet: false,
     }
   },
-
   computed: {
     ...mapFields("signal", [
       "table.loading",
@@ -143,18 +141,21 @@ export default {
       "table.rows.items",
       "table.rows.total",
     ]),
-    ...mapFields("route", ["query", "params"]),
     ...mapFields("auth", ["currentUser.projects"]),
   },
-
   methods: {
     ...mapActions("signal", ["getAll", "createEditShow", "removeShow"]),
   },
-
   created() {
-    this.project = [{ name: this.query.project }]
-
+    this.project = [{ name: this.$route.query.project }]
     this.getAll()
+
+    this.$watch(
+      (vm) => [vm.page],
+      () => {
+        this.getAll()
+      }
+    )
 
     this.$watch(
       (vm) => [vm.q, vm.itemsPerPage, vm.sortBy, vm.descending, vm.project],
@@ -167,3 +168,9 @@ export default {
   },
 }
 </script>
+
+<style>
+.mdi-school {
+  color: white !important;
+}
+</style>

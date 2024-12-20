@@ -8,8 +8,7 @@ from sqlalchemy.event import listen
 from sqlalchemy_utils import TSVectorType
 
 from dispatch.database.core import Base, ensure_unique_default_per_project
-from dispatch.models import DispatchBase, NameStr, ProjectMixin, PrimaryKey
-from dispatch.project.models import ProjectRead
+from dispatch.models import DispatchBase, NameStr, ProjectMixin, PrimaryKey, Pagination
 
 
 class IncidentPriority(Base, ProjectMixin):
@@ -34,6 +33,12 @@ class IncidentPriority(Base, ProjectMixin):
 
 
 listen(IncidentPriority.default, "set", ensure_unique_default_per_project)
+
+
+class ProjectRead(DispatchBase):
+    id: Optional[PrimaryKey]
+    name: NameStr
+    display_name: Optional[str]
 
 
 # Pydantic models...
@@ -75,6 +80,5 @@ class IncidentPriorityReadMinimal(DispatchBase):
     color: Optional[Color] = Field(None, nullable=True)
 
 
-class IncidentPriorityPagination(DispatchBase):
-    total: int
+class IncidentPriorityPagination(Pagination):
     items: List[IncidentPriorityRead] = []

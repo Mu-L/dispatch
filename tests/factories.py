@@ -1,31 +1,45 @@
 import uuid
-
-from pytz import UTC
 from datetime import datetime
 
-from faker import Faker
-
-from factory import Sequence, post_generation, SubFactory, LazyAttribute, LazyFunction
+from factory import (
+    LazyAttribute,
+    LazyFunction,
+    Sequence,
+    SubFactory,
+    post_generation,
+    SelfAttribute,
+)
 from factory.alchemy import SQLAlchemyModelFactory
-from factory.fuzzy import FuzzyChoice, FuzzyText, FuzzyDateTime, FuzzyInteger
+from factory.fuzzy import FuzzyChoice, FuzzyDateTime, FuzzyInteger, FuzzyText
+from faker import Faker
+from faker.providers import misc
+from pytz import UTC
 
-from dispatch.auth.models import DispatchUser, hash_password  # noqa
-from dispatch.case.models import Case, CaseRead, Case
+from dispatch.auth.models import DispatchUser, DispatchUserOrganization, hash_password  # noqa
+from dispatch.case.models import Case, CaseRead
 from dispatch.case.priority.models import CasePriority
 from dispatch.case.severity.models import CaseSeverity
 from dispatch.case.type.models import CaseType
+from dispatch.case_cost.models import CaseCost
+from dispatch.case_cost_type.models import CaseCostType
 from dispatch.conference.models import Conference
 from dispatch.conversation.models import Conversation
 from dispatch.definition.models import Definition
 from dispatch.document.models import Document
+from dispatch.email_templates.models import EmailTemplates
+from dispatch.email_templates.enums import EmailTemplateTypes
+from dispatch.entity.models import Entity
+from dispatch.entity_type.models import EntityType
 from dispatch.event.models import Event
-from dispatch.feedback.models import Feedback
+from dispatch.feedback.incident.models import Feedback
 from dispatch.group.models import Group
 from dispatch.incident.models import Incident
 from dispatch.incident.priority.models import IncidentPriority
 from dispatch.incident.severity.models import IncidentSeverity
 from dispatch.incident.type.models import IncidentType
 from dispatch.incident_cost.models import IncidentCost
+from dispatch.cost_model.models import CostModel, CostModelActivity
+from dispatch.participant_activity.models import ParticipantActivity
 from dispatch.incident_cost_type.models import IncidentCostType
 from dispatch.incident_role.models import IncidentRole
 from dispatch.individual.models import IndividualContact
@@ -33,12 +47,15 @@ from dispatch.notification.models import Notification
 from dispatch.organization.models import Organization
 from dispatch.participant.models import Participant
 from dispatch.participant_role.models import ParticipantRole
-from dispatch.plugin.models import Plugin, PluginInstance
+from dispatch.plugin.models import Plugin, PluginInstance, PluginEvent
 from dispatch.project.models import Project
 from dispatch.report.models import Report
 from dispatch.route.models import Recommendation, RecommendationMatch
 from dispatch.search_filter.models import SearchFilter
 from dispatch.service.models import Service
+from dispatch.feedback.service.models import ServiceFeedback
+from dispatch.feedback.service.enums import ServiceFeedbackRating
+from dispatch.signal.models import Signal, SignalFilter, SignalInstance
 from dispatch.storage.models import Storage
 from dispatch.tag.models import Tag
 from dispatch.tag_type.models import TagType
@@ -47,8 +64,12 @@ from dispatch.team.models import TeamContact
 from dispatch.term.models import Term
 from dispatch.ticket.models import Ticket
 from dispatch.workflow.models import Workflow, WorkflowInstance
+from dispatch.enums import UserRoles, Visibility
 
 from .database import Session
+
+fake = Faker()
+fake.add_provider(misc)
 
 
 class BaseFactory(SQLAlchemyModelFactory):
@@ -106,26 +127,58 @@ class OrganizationFactory(BaseFactory):
                 self.projects.append(project)
 
 
+class DispatchUserOrganizationFactory(BaseFactory):
+    """Dispatch User Organization Factory."""
+
+    dispatch_user = SubFactory(DispatchUserFactory)
+    organization = SubFactory(OrganizationFactory)
+    role = UserRoles.member
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = DispatchUserOrganization
+
+
 class ProjectFactory(BaseFactory):
     """Project Factory."""
 
     name = Sequence(lambda n: f"project{n}")
     description = FuzzyText()
-    default = Faker().pybool()
+    default = False
     color = Faker().color()
+    organization = SubFactory(OrganizationFactory)
 
     class Meta:
         """Factory Configuration."""
 
         model = Project
 
+
+class CostModelFactory(BaseFactory):
+    """Cost Model Factory."""
+
+    id = Sequence(lambda n: f"1{n}")
+    name = FuzzyText()
+    description = FuzzyText()
+    created_at = FuzzyDateTime(datetime(2020, 1, 1, tzinfo=UTC))
+    updated_at = FuzzyDateTime(datetime(2020, 1, 1, tzinfo=UTC))
+    enabled = Faker().pybool()
+    project = SubFactory(ProjectFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = CostModel
+
     @post_generation
-    def organization(self, create, extracted, **kwargs):
+    def activities(self, create, extracted, **kwargs):
         if not create:
             return
 
         if extracted:
-            self.organization_id = extracted.id
+            for activity in extracted:
+                self.activities.append(activity)
 
 
 class ResourceBaseFactory(TimeStampBaseFactory):
@@ -368,6 +421,7 @@ class IncidentTypeFactory(BaseFactory):
     description = FuzzyText()
     slug = FuzzyText()
     project = SubFactory(ProjectFactory)
+    cost_model = SubFactory(CostModelFactory)
 
     class Meta:
         """Factory Configuration."""
@@ -472,11 +526,13 @@ class ParticipantRoleFactory(BaseFactory):
 class ParticipantFactory(BaseFactory):
     """Participant Factory."""
 
-    team = Sequence(lambda n: f"team{n}")
+    # team = Sequence(lambda n: f"team{n}")
     department = Sequence(lambda n: f"department{n}")
     location = Sequence(lambda n: f"location{n}")
     added_reason = Sequence(lambda n: f"added_reason{n}")
     after_hours_notification = Faker().pybool()
+    user_conversation_id = FuzzyText()
+    individual = SubFactory(IndividualContactFactory)
 
     class Meta:
         """Factory Configuration."""
@@ -490,14 +546,6 @@ class ParticipantFactory(BaseFactory):
 
         if extracted:
             self.incident_id = extracted.id
-
-    @post_generation
-    def individual_contact(self, create, extracted, **kwargs):
-        if not create:
-            return
-
-        if extracted:
-            self.individual_contact_id = extracted.id
 
     @post_generation
     def team(self, create, extracted, **kwargs):
@@ -673,12 +721,40 @@ class CaseTypeFactory(BaseFactory):
 
     name = FuzzyText()
     description = FuzzyText()
+    conversation_target = FuzzyText()
     project = SubFactory(ProjectFactory)
+    cost_model = SubFactory(CostModelFactory)
 
     class Meta:
         """Factory Configuration."""
 
         model = CaseType
+
+
+class CasePriorityFactory(BaseFactory):
+    """Case Priority Factory."""
+
+    name = FuzzyText()
+    description = FuzzyText()
+    project = SubFactory(ProjectFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = CasePriority
+
+
+class CaseSeverityFactory(BaseFactory):
+    """Case Severity Factory."""
+
+    name = FuzzyText()
+    description = FuzzyText()
+    project = SubFactory(ProjectFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = CaseSeverity
 
 
 class CaseFactory(BaseFactory):
@@ -688,14 +764,27 @@ class CaseFactory(BaseFactory):
     name = FuzzyText()
     title = FuzzyText()
     description = FuzzyText()
+    resolution = FuzzyText()
+    resolution_reason = FuzzyChoice(["False Positive", "User Acknowledged"])
     status = FuzzyChoice(["New", "Triage", "Escalated", "Closed"])
     project = SubFactory(ProjectFactory)
+    case_priority = SubFactory(CasePriorityFactory)
+    case_severity = SubFactory(CaseSeverityFactory)
     case_type = SubFactory(CaseTypeFactory)
 
     class Meta:
         """Factory Configuration."""
 
         model = Case
+
+    @post_generation
+    def tags(self, create, extracted, **kwargs):
+        if not create:
+            return
+
+        if extracted:
+            for tag in extracted:
+                self.tags.append(tag)
 
     class Params:
         status = "New"
@@ -744,6 +833,95 @@ class CaseReadFactory(BaseFactory):
         model = CaseRead
 
 
+class EntityTypeFactory(BaseFactory):
+    name = FuzzyText()
+    description = FuzzyText()
+    jpath = FuzzyText()
+    regular_expression = r"[a-zA-Z]+"
+    enabled = Faker().pybool()
+    project = SubFactory(ProjectFactory)
+
+    class Meta:
+        model = EntityType
+
+
+class EntityFactory(BaseFactory):
+    name = FuzzyText()
+    description = FuzzyText()
+    value = FuzzyText()
+    source = FuzzyText()
+    entity_type = SubFactory(EntityTypeFactory)
+    project = SubFactory(ProjectFactory)
+
+    class Meta:
+        model = Entity
+
+
+class SignalFactory(BaseFactory):
+    name = "Test Signal"
+    owner = "Test Owner"
+    description = "Test Description"
+    external_url = "https://test.com"
+    external_id = "1234"
+    variant = "Test Variant"
+    enabled = True
+    loopin_signal_identity = False
+    project = SubFactory(ProjectFactory)
+    case_type = SubFactory(CaseTypeFactory, project=SelfAttribute("..project"))
+
+    class Meta:
+        model = Signal
+
+
+class SignalInstanceFactory(BaseFactory):
+    id = LazyFunction(uuid.uuid4)
+    project = SubFactory(ProjectFactory)
+    case = SubFactory(CaseFactory)
+    signal = SubFactory(SignalFactory)
+    raw = {
+        "action": [{"type": "AWS_API_CALL", "value": {"Api": "assumerole", "ServiceName": "sts"}}],
+        "additionalMetadata": [],
+        "asset": [
+            {"id": "arn:aws:iam::123456789012:role/Test", "type": "AwsIamRole", "details": {}},
+            {
+                "id": "arn:aws:s3:::ap-northeast-3-123456789012-s3-server-access-logs",
+                "type": "AwsS3Bucket",
+                "details": {},
+            },
+        ],
+        "identity": {"id": "923456789012", "type": "AWS Principal"},
+        "originLocation": [],
+        "variant": "TEST:1.A",
+        "created_at": None,
+        "id": "TEST:1.A/c12a34a5-dd67-8910-1a1a-c1e23456f7c8",
+    }
+
+    class Meta:
+        model = SignalInstance
+
+
+class SignalFilterFactory(BaseFactory):
+    """Signal Filter Factory."""
+
+    name = FuzzyText()
+    description = FuzzyText()
+    expression = [{}]
+    action = FuzzyChoice(choices=["snooze", "deduplicate"])
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = SignalFilter
+
+    @post_generation
+    def creator(self, create, extracted, **kwargs):
+        if not create:
+            return
+
+        if extracted:
+            self.creator_id = extracted.id
+
+
 class IncidentFactory(BaseFactory):
     """Incident Factory."""
 
@@ -756,6 +934,9 @@ class IncidentFactory(BaseFactory):
     incident_priority = SubFactory(IncidentPriorityFactory)
     incident_severity = SubFactory(IncidentSeverityFactory)
     project = SubFactory(ProjectFactory)
+    commander = SubFactory(ParticipantFactory)
+    conversation = SubFactory(ConversationFactory)
+    visibility = Visibility.open
 
     class Meta:
         """Factory Configuration."""
@@ -770,6 +951,16 @@ class IncidentFactory(BaseFactory):
         if extracted:
             for participant in extracted:
                 self.participants.append(participant)
+            self.participants.append(self.commander)
+
+    @post_generation
+    def tags(self, create, extracted, **kwargs):
+        if not create:
+            return
+
+        if extracted:
+            for tag in extracted:
+                self.tags.append(tag)
 
 
 class TaskFactory(ResourceBaseFactory):
@@ -806,13 +997,13 @@ class TaskFactory(ResourceBaseFactory):
         if extracted:
             self.owner_id = extracted.id
 
-    @post_generation
-    def incident(self, create, extracted, **kwargs):
-        if not create:
-            return
+    # @post_generation
+    # def incident(self, create, extracted, **kwargs):
+    #     if not create:
+    #         return
 
-        if extracted:
-            self.incident_id = extracted.id
+    #     if extracted:
+    #         self.incident_id = extracted.id
 
     @post_generation
     def assignees(self, create, extracted, **kwargs):
@@ -971,6 +1162,49 @@ class FeedbackFactory(BaseFactory):
             self.participant_id = extracted.id
 
 
+class CaseCostFactory(BaseFactory):
+    """Case Cost Factory."""
+
+    amount = FuzzyInteger(low=0, high=10000)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = CaseCost
+
+    @post_generation
+    def case(self, create, extracted, **kwargs):
+        if not create:
+            return
+
+        if extracted:
+            self.case_id = extracted.id
+
+    @post_generation
+    def case_cost_type(self, create, extracted, **kwargs):
+        if not create:
+            return
+
+        if extracted:
+            self.case_cost_type_id = extracted.id
+
+
+class CaseCostTypeFactory(BaseFactory):
+    """Case Cost Type Factory."""
+
+    name = FuzzyText()
+    description = FuzzyText()
+    category = FuzzyText()
+    details = {}
+    default = Faker().pybool()
+    editable = Faker().pybool()
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = CaseCostType
+
+
 class IncidentCostFactory(BaseFactory):
     """Incident Cost Factory."""
 
@@ -1012,6 +1246,22 @@ class IncidentCostTypeFactory(BaseFactory):
         """Factory Configuration."""
 
         model = IncidentCostType
+
+
+class EmailTemplateFactory(BaseFactory):
+    """Email Template Factory."""
+
+    # Columns
+    email_template_type = EmailTemplateTypes.welcome
+    welcome_text = "Welcome to Incident {{title}} "
+    welcome_body = "{{title}} Incident\n{{description}}"
+    components = ["title", "description"]
+    enabled = True
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = EmailTemplates
 
 
 class NotificationFactory(BaseFactory):
@@ -1080,7 +1330,8 @@ class PluginFactory(BaseFactory):
 class PluginInstanceFactory(BaseFactory):
     """PluginInstance Factory."""
 
-    enabled = Faker().pybool()
+    # id = Sequence(lambda n: f"1{n}")
+    enabled = True
     project = SubFactory(ProjectFactory)
     plugin = SubFactory(PluginFactory)
 
@@ -1088,6 +1339,51 @@ class PluginInstanceFactory(BaseFactory):
         """Factory Configuration."""
 
         model = PluginInstance
+
+
+class PluginEventFactory(BaseFactory):
+    """Plugin Event Factory."""
+
+    id = Sequence(lambda n: f"1{n}")
+    name = FuzzyText()
+    slug = Sequence(lambda n: f"1{n}")  # Ensures unique slug
+    plugin = SubFactory(PluginFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = PluginEvent
+
+
+class CostModelActivityFactory(BaseFactory):
+    """Cost Model Activity Factory."""
+
+    response_time_seconds = FuzzyInteger(low=1, high=10000)
+    enabled = Faker().pybool()
+    plugin_event = SubFactory(PluginEventFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = CostModelActivity
+
+
+class ParticipantActivityFactory(BaseFactory):
+    """Participant Activity Factory."""
+
+    id = Sequence(lambda n: f"1{n}")
+    plugin_event = SubFactory(PluginEventFactory)
+    started_at = FuzzyDateTime(
+        start_dt=datetime(2020, 1, 1, tzinfo=UTC), end_dt=datetime(2020, 2, 1, tzinfo=UTC)
+    )
+    ended_at = FuzzyDateTime(start_dt=datetime(2020, 2, 2, tzinfo=UTC))
+    participant = SubFactory(ParticipantFactory)
+    incident = SubFactory(IncidentFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = ParticipantActivity
 
 
 class WorkflowFactory(BaseFactory):
@@ -1184,3 +1480,34 @@ class WorkflowInstanceFactory(BaseFactory):
 
         if extracted:
             self.creator_id = extracted.id
+
+
+class ServiceFeedbackFactory(BaseFactory):
+    """Service Feedback Factory."""
+
+    rating = FuzzyChoice(
+        [
+            ServiceFeedbackRating.no_effort,
+            ServiceFeedbackRating.little_effort,
+            ServiceFeedbackRating.moderate_effort,
+            ServiceFeedbackRating.lots_of_effort,
+            ServiceFeedbackRating.very_high_effort,
+            ServiceFeedbackRating.extreme_effort,
+        ]
+    )
+    feedback = FuzzyText()
+    hours = FuzzyInteger(low=0, high=100)
+    project = SubFactory(ProjectFactory)
+
+    class Meta:
+        """Factory Configuration."""
+
+        model = ServiceFeedback
+
+    @post_generation
+    def individual(self, create, extracted, **kwargs):
+        if not create:
+            return
+
+        if extracted:
+            self.individual_id = extracted.id

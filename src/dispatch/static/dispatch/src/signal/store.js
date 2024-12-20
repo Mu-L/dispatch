@@ -6,21 +6,36 @@ import SignalApi from "@/signal/api"
 
 const getDefaultSelectedState = () => {
   return {
-    id: null,
-    name: null,
+    case_priority: null,
+    case_type: null,
+    conversation_target: null,
+    create_case: true,
+    created_at: null,
     description: null,
-    variant: null,
-    owner: null,
+    enabled: false,
+    engagements: [],
+    entity_types: [],
     external_id: null,
     external_url: null,
-    case_type: null,
-    case_priority: null,
-    duplication_rule: null,
-    suppression_rule: null,
-    source: null,
-    project: null,
-    created_at: null,
+    filters: [],
+    genai_enabled: false,
+    genai_model: null,
+    genai_prompt: null,
+    genai_system_message: null,
+    id: null,
+    lifecycle: null,
     loading: false,
+    name: null,
+    oncall_service: null,
+    owner: null,
+    project: null,
+    runbook: null,
+    signal_definition: null,
+    source: null,
+    tags: [],
+    variant: null,
+    workflow_instances: null,
+    workflows: [],
   }
 }
 
@@ -33,6 +48,29 @@ const state = {
     showRawSignalDialog: false,
     showRemove: false,
   },
+  table: {
+    rows: {
+      items: [],
+      total: null,
+    },
+    options: {
+      filters: {
+        case_priority: [],
+        case_severity: [],
+        case_type: [],
+        project: [],
+        tag: [],
+        tag_type: [],
+      },
+      q: "",
+      page: 1,
+      itemsPerPage: 25,
+      sortBy: ["name"],
+      descending: [true],
+    },
+    loading: false,
+    bulkEditLoading: false,
+  },
   instanceTable: {
     rows: {
       items: [],
@@ -44,35 +82,15 @@ const state = {
           start: null,
           end: null,
         },
+        signal: [],
       },
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["created_at"],
       descending: [true],
     },
     loading: false,
-  },
-  table: {
-    rows: {
-      items: [],
-      total: null,
-    },
-    options: {
-      filters: {
-        created_at: {
-          start: null,
-          end: null,
-        },
-      },
-      q: "",
-      page: 1,
-      itemsPerPage: 10,
-      sortBy: ["name"],
-      descending: [true],
-    },
-    loading: false,
-    bulkEditLoading: false,
   },
 }
 
@@ -160,7 +178,7 @@ const actions = {
           dispatch("getAll")
           commit(
             "notification_backend/addBeNotification",
-            { text: "Signal Defintion updated successfully.", type: "success" },
+            { text: "Signal Definition updated successfully.", type: "success" },
             { root: true }
           )
         })

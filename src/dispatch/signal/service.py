@@ -1,107 +1,335 @@
 import json
-import hashlib
-from typing import Optional
+import logging
+import uuid
 from datetime import datetime, timedelta, timezone
-from dispatch.enums import RuleMode
-from dispatch.project import service as project_service
-from dispatch.tag import service as tag_service
-from dispatch.tag_type import service as tag_type_service
-from dispatch.case.type import service as case_type_service
-from dispatch.case.priority import service as case_priority_service
+from typing import Optional, Union
 
+from fastapi import HTTPException, status
+from pydantic.error_wrappers import ErrorWrapper, ValidationError
+from sqlalchemy import asc, desc, or_
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.query import Query
+from sqlalchemy.sql.expression import true
+
+from dispatch.auth.models import DispatchUser
+from dispatch.case.models import Case
+from dispatch.case.priority import service as case_priority_service
+from dispatch.case.type import service as case_type_service
+from dispatch.case.type.models import CaseType
+from dispatch.database.service import apply_filter_specific_joins, apply_filters
+from dispatch.entity.models import Entity
+from dispatch.entity_type import service as entity_type_service
+from dispatch.entity_type.models import EntityType
+from dispatch.exceptions import NotFoundError
+from dispatch.project import service as project_service
+from dispatch.service import service as service_service
+from dispatch.tag import service as tag_service
+from dispatch.workflow import service as workflow_service
+
+from .exceptions import (
+    SignalNotDefinedException,
+    SignalNotIdentifiedException,
+)
 from .models import (
     Signal,
     SignalCreate,
-    SignalUpdate,
+    SignalEngagement,
+    SignalEngagementCreate,
+    SignalEngagementRead,
+    SignalEngagementUpdate,
+    SignalFilter,
+    SignalFilterAction,
+    SignalFilterCreate,
+    SignalFilterMode,
+    SignalFilterRead,
+    SignalFilterUpdate,
     SignalInstance,
-    SuppressionRule,
-    DuplicationRule,
     SignalInstanceCreate,
-    DuplicationRuleCreate,
-    DuplicationRuleUpdate,
-    SuppressionRuleCreate,
-    SuppressionRuleUpdate,
+    SignalUpdate,
+    assoc_signal_entity_types,
 )
 
-
-def create_duplication_rule(
-    *, db_session, duplication_rule_in: DuplicationRuleCreate
-) -> DuplicationRule:
-    """Creates a new duplication rule."""
-    rule = DuplicationRule(**duplication_rule_in.dict(exclude={"tag_types"}))
-
-    tag_types = []
-    for t in duplication_rule_in.tag_types:
-        tag_types.append(tag_type_service.get(db_session=db_session, tag_type_id=t.id))
-
-    rule.tag_types = tag_types
-    db_session.add(rule)
-    db_session.commit()
-    return rule
+log = logging.getLogger(__name__)
 
 
-def update_duplication_rule(
-    *, db_session, duplication_rule_in: DuplicationRuleUpdate
-) -> DuplicationRule:
-    """Updates an 1existing duplication rule."""
-    rule = (
-        db_session.query(DuplicationRule).filter(DuplicationRule.id == duplication_rule_in.id).one()
+def get_signal_engagement(
+    *, db_session: Session, signal_engagement_id: int
+) -> Optional[SignalEngagement]:
+    """Gets a signal engagement by id."""
+    return (
+        db_session.query(SignalEngagement)
+        .filter(SignalEngagement.id == signal_engagement_id)
+        .one_or_none()
     )
 
-    tag_types = []
-    for t in duplication_rule_in.tag_types:
-        tag_types.append(tag_type_service.get(db_session=db_session, tag_type_id=t.id))
 
-    rule.tag_types = tag_types
-    rule.window = duplication_rule_in.window
-    db_session.add(rule)
-    db_session.commit()
-    return rule
-
-
-def create_suppression_rule(
-    *, db_session, suppression_rule_in: SuppressionRuleCreate
-) -> SuppressionRule:
-    """Creates a new supression rule."""
-    rule = SuppressionRule(**suppression_rule_in.dict(exclude={"tags"}))
-
-    tags = []
-    for t in suppression_rule_in.tags:
-        tags.append(tag_service.get_or_create(db_session=db_session, tag_in=t))
-
-    rule.tags = tags
-    db_session.add(rule)
-    db_session.commit()
-    return rule
-
-
-def update_suppression_rule(
-    *, db_session, suppression_rule_in: SuppressionRuleUpdate
-) -> SuppressionRule:
-    """Updates an existing supression rule."""
-    rule = (
-        db_session.query(SuppressionRule).filter(SuppressionRule.id == suppression_rule_in.id).one()
+def get_signal_engagement_by_name(
+    *, db_session, project_id: int, name: str
+) -> Optional[SignalEngagement]:
+    """Gets a signal engagement by its name."""
+    return (
+        db_session.query(SignalEngagement)
+        .filter(SignalEngagement.project_id == project_id)
+        .filter(SignalEngagement.name == name)
+        .first()
     )
 
-    tags = []
-    for t in suppression_rule_in.tags:
-        tags.append(tag_service.get_or_create(db_session=db_session, tag_in=t))
 
-    rule.tags = tags
-    db_session.add(rule)
+def get_signal_engagement_by_name_or_raise(
+    *, db_session: Session, project_id: int, signal_engagement_in: SignalEngagementRead
+) -> SignalEngagement:
+    """Gets a signal engagement by its name or raises an error if not found."""
+    signal_engagement = get_signal_engagement_by_name(
+        db_session=db_session, project_id=project_id, name=signal_engagement_in.name
+    )
+
+    if not signal_engagement:
+        raise ValidationError(
+            [
+                ErrorWrapper(
+                    NotFoundError(
+                        msg="Signal engagement not found.",
+                        signal_engagement=signal_engagement_in.name,
+                    ),
+                    loc="signalEngagement",
+                )
+            ],
+            model=SignalEngagementRead,
+        )
+    return signal_engagement
+
+
+def create_signal_engagement(
+    *, db_session: Session, creator: DispatchUser, signal_engagement_in: SignalEngagementCreate
+) -> SignalEngagement:
+    """Creates a new signal engagement."""
+    project = project_service.get_by_name_or_raise(
+        db_session=db_session, project_in=signal_engagement_in.project
+    )
+
+    entity_type = entity_type_service.get(
+        db_session=db_session, entity_type_id=signal_engagement_in.entity_type.id
+    )
+
+    signal_engagement = SignalEngagement(
+        name=signal_engagement_in.name,
+        description=signal_engagement_in.description,
+        message=signal_engagement_in.message,
+        require_mfa=signal_engagement_in.require_mfa,
+        entity_type=entity_type,
+        creator=creator,
+        project=project,
+    )
+    db_session.add(signal_engagement)
     db_session.commit()
-    return rule
+    return signal_engagement
 
 
-def get(*, db_session, signal_id: int) -> Optional[Signal]:
+def update_signal_engagement(
+    *,
+    db_session: Session,
+    signal_engagement: SignalEngagement,
+    signal_engagement_in: SignalEngagementUpdate,
+) -> SignalEngagement:
+    """Updates an existing signal engagement."""
+    signal_engagement_data = signal_engagement.dict()
+    update_data = signal_engagement_in.dict(
+        skip_defaults=True,
+        exclude={},
+    )
+
+    for field in signal_engagement_data:
+        if field in update_data:
+            setattr(signal_engagement, field, update_data[field])
+
+    db_session.add(signal_engagement)
+    db_session.commit()
+    return signal_engagement
+
+
+def get_all_by_entity_type(*, db_session: Session, entity_type_id: int) -> list[SignalInstance]:
+    """Fetches all signal instances associated with a given entity type."""
+    return (
+        db_session.query(SignalInstance)
+        .join(SignalInstance.signal)
+        .join(assoc_signal_entity_types)
+        .join(EntityType)
+        .filter(assoc_signal_entity_types.c.entity_type_id == entity_type_id)
+        .all()
+    )
+
+
+def create_signal_instance(*, db_session: Session, signal_instance_in: SignalInstanceCreate):
+    """Creates a new signal instance."""
+    project = project_service.get_by_name_or_default(
+        db_session=db_session, project_in=signal_instance_in.project
+    )
+
+    if not signal_instance_in.signal:
+        external_id = signal_instance_in.external_id
+
+        # this assumes the external_ids are uuids
+        if not external_id:
+            msg = "A detection external id must be provided in order to get the signal definition."
+            raise SignalNotIdentifiedException(msg)
+
+        signal_definition = (
+            db_session.query(Signal).filter(Signal.external_id == external_id).one_or_none()
+        )
+
+    if not signal_definition:
+        # we get the default signal definition
+        signal_definition = get_default(
+            db_session=db_session,
+            project_id=project.id,
+        )
+        msg = f"Default signal definition used for signal instance with external id {external_id}"
+        log.warn(msg)
+
+    if not signal_definition:
+        msg = f"No signal definition could be found by external id {external_id}, and no default exists."
+        raise SignalNotDefinedException(msg)
+
+    signal_instance_in.signal = signal_definition
+
+    signal_instance = create_instance(db_session=db_session, signal_instance_in=signal_instance_in)
+    signal_instance.signal = signal_definition
+    db_session.commit()
+
+    return signal_instance
+
+
+def create_signal_filter(
+    *, db_session: Session, creator: DispatchUser, signal_filter_in: SignalFilterCreate
+) -> SignalFilter:
+    """Creates a new signal filter."""
+    project = project_service.get_by_name_or_raise(
+        db_session=db_session, project_in=signal_filter_in.project
+    )
+
+    signal_filter = SignalFilter(
+        **signal_filter_in.dict(
+            exclude={
+                "project",
+            }
+        ),
+        creator=creator,
+        project=project,
+    )
+    db_session.add(signal_filter)
+    db_session.commit()
+    return signal_filter
+
+
+def update_signal_filter(
+    *, db_session: Session, signal_filter: SignalFilter, signal_filter_in: SignalFilterUpdate
+) -> SignalFilter:
+    """Updates an existing signal filter."""
+
+    signal_filter_data = signal_filter.dict()
+    update_data = signal_filter_in.dict(
+        skip_defaults=True,
+        exclude={},
+    )
+
+    for field in signal_filter_data:
+        if field in update_data:
+            setattr(signal_filter, field, update_data[field])
+
+    db_session.add(signal_filter)
+    db_session.commit()
+    return signal_filter
+
+
+def delete_signal_filter(*, db_session: Session, signal_filter_id: int) -> int:
+    """Deletes an existing signal filter."""
+    signal_filter = db_session.query(SignalFilter).filter(SignalFilter.id == signal_filter_id).one()
+    db_session.delete(signal_filter)
+    db_session.commit()
+    return signal_filter_id
+
+
+def get_signal_filter_by_name_or_raise(
+    *, db_session: Session, project_id: int, signal_filter_in: SignalFilterRead
+) -> SignalFilter:
+    signal_filter = get_signal_filter_by_name(
+        db_session=db_session, project_id=project_id, name=signal_filter_in.name
+    )
+
+    if not signal_filter:
+        raise ValidationError(
+            [
+                ErrorWrapper(
+                    NotFoundError(
+                        msg="Signal Filter not found.", entity_type=signal_filter_in.name
+                    ),
+                    loc="signalFilter",
+                )
+            ],
+            model=SignalFilterRead,
+        )
+    return signal_filter
+
+
+def get_signal_filter_by_name(*, db_session, project_id: int, name: str) -> Optional[SignalFilter]:
+    """Gets a signal filter by its name."""
+    return (
+        db_session.query(SignalFilter)
+        .filter(SignalFilter.project_id == project_id)
+        .filter(SignalFilter.name == name)
+        .first()
+    )
+
+
+def get_signal_filter(*, db_session: Session, signal_filter_id: int) -> SignalFilter:
+    """Gets a single signal filter."""
+    return db_session.query(SignalFilter).filter(SignalFilter.id == signal_filter_id).one_or_none()
+
+
+def get_signal_instance(
+    *, db_session: Session, signal_instance_id: int | str
+) -> Optional[SignalInstance]:
+    """Gets a signal instance by its UUID."""
+    return (
+        db_session.query(SignalInstance)
+        .filter(SignalInstance.id == signal_instance_id)
+        .one_or_none()
+    )
+
+
+def get(*, db_session: Session, signal_id: Union[str, int]) -> Optional[Signal]:
     """Gets a signal by id."""
-    return db_session.query(Signal).filter(Signal.id == signal_id).one()
+    return db_session.query(Signal).filter(Signal.id == signal_id).one_or_none()
+
+
+def get_default(*, db_session: Session, project_id: int) -> Optional[Signal]:
+    """Gets the default signal definition."""
+    return (
+        db_session.query(Signal)
+        .filter(Signal.project_id == project_id, Signal.default == true())
+        .one_or_none()
+    )
+
+
+def get_by_primary_or_external_id(
+    *, db_session: Session, signal_id: Union[str, int]
+) -> Optional[Signal]:
+    """Gets a signal by id or external_id."""
+    if is_valid_uuid(signal_id):
+        signal = db_session.query(Signal).filter(Signal.external_id == signal_id).one_or_none()
+    else:
+        signal = (
+            db_session.query(Signal)
+            .filter(or_(Signal.id == signal_id, Signal.external_id == signal_id))
+            .one_or_none()
+        )
+    return signal
 
 
 def get_by_variant_or_external_id(
-    *, db_session, project_id: int, external_id: str = None, variant: str = None
+    *, db_session: Session, project_id: int, external_id: str = None, variant: str = None
 ) -> Optional[Signal]:
-    """Gets a signal it's external id (and variant if supplied)."""
+    """Gets a signal by its variant or external id."""
     if variant:
         return (
             db_session.query(Signal)
@@ -115,7 +343,23 @@ def get_by_variant_or_external_id(
     )
 
 
-def create(*, db_session, signal_in: SignalCreate) -> Signal:
+def get_all_by_conversation_target(
+    *, db_session: Session, project_id: int, conversation_target: str
+) -> list[Signal]:
+    """Gets all signals for a given conversation target (e.g. #conversation-channel)"""
+    return (
+        db_session.query(Signal)
+        .join(CaseType)
+        .filter(
+            CaseType.project_id == project_id,
+            CaseType.conversation_target == conversation_target,
+            Signal.case_type_id == CaseType.id,
+        )
+        .all()
+    )
+
+
+def create(*, db_session: Session, signal_in: SignalCreate) -> Signal:
     """Creates a new signal."""
     project = project_service.get_by_name_or_raise(
         db_session=db_session, project_in=signal_in.project
@@ -124,34 +368,69 @@ def create(*, db_session, signal_in: SignalCreate) -> Signal:
     signal = Signal(
         **signal_in.dict(
             exclude={
-                "project",
-                "case_type",
                 "case_priority",
+                "case_type",
+                "engagements",
+                "entity_types",
+                "filters",
+                "oncall_service",
+                "project",
                 "source",
-                "suppression_rule",
-                "duplication_rule",
+                "tags",
+                "workflows",
             }
         ),
         project=project,
     )
 
-    if signal_in.duplication_rule:
-        duplication_rule = create_duplication_rule(
-            db_session=db_session, duplication_rule_in=signal_in.duplication_rule
-        )
-        signal.duplication_rule = duplication_rule
+    tags = []
+    for t in signal_in.tags:
+        tags.append(tag_service.get_or_create(db_session=db_session, tag_in=t))
+    signal.tags = tags
 
-    if signal_in.suppression_rule:
-        suppression_rule = create_suppression_rule(
-            db_session=db_session, suppression_rule_in=signal.suppression_rule
+    entity_types = []
+    for e in signal_in.entity_types:
+        entity_type = entity_type_service.get(db_session=db_session, entity_type_id=e.id)
+        entity_types.append(entity_type)
+
+    signal.entity_types = entity_types
+
+    engagements = []
+    for signal_engagement_in in signal_in.engagements:
+        signal_engagement = get_signal_engagement_by_name(
+            db_session=db_session, project_id=project.id, name=signal_engagement_in.name
         )
-        signal.suppression_rule = suppression_rule
+        engagements.append(signal_engagement)
+
+    signal.engagements = engagements
+
+    filters = []
+    for f in signal_in.filters:
+        signal_filter = get_signal_filter_by_name(
+            db_session=db_session, project_id=project.id, signal_filter_in=f
+        )
+        filters.append(signal_filter)
+
+    signal.filters = filters
+
+    workflows = []
+    for w in signal_in.workflows:
+        workflow = workflow_service.get_by_name_or_raise(db_session=db_session, workflow_in=w)
+        workflows.append(workflow)
+
+    signal.workflows = workflows
 
     if signal_in.case_priority:
         case_priority = case_priority_service.get_by_name_or_default(
             db_session=db_session, project_id=project.id, case_priority_in=signal_in.case_priority
         )
         signal.case_priority = case_priority
+
+    if signal_in.oncall_service:
+        oncall_service = service_service.get(
+            db_session=db_session, service_id=signal_in.oncall_service.id
+        )
+        signal.oncall_service = oncall_service
 
     if signal_in.case_type:
         case_type = case_type_service.get_by_name_or_default(
@@ -164,41 +443,85 @@ def create(*, db_session, signal_in: SignalCreate) -> Signal:
     return signal
 
 
-def update(*, db_session, signal: Signal, signal_in: SignalUpdate) -> Signal:
-    """Creates a new signal."""
+def update(*, db_session: Session, signal: Signal, signal_in: SignalUpdate) -> Signal:
+    """Updates a signal."""
     signal_data = signal.dict()
-    update_data = signal_in.dict(skip_defaults=True)
+    update_data = signal_in.dict(
+        skip_defaults=True,
+        exclude={
+            "project",
+            "case_type",
+            "case_priority",
+            "source",
+            "engagements",
+            "filters",
+            "entity_types",
+            "tags",
+        },
+    )
 
     for field in signal_data:
         if field in update_data:
             setattr(signal, field, update_data[field])
 
-    if signal_in.duplication_rule:
-        if signal_in.duplication_rule.id:
-            update_duplication_rule(
-                db_session=db_session, duplication_rule_in=signal_in.duplication_rule
-            )
-        else:
-            duplication_rule = create_duplication_rule(
-                db_session=db_session, duplication_rule_in=signal_in.duplication_rule
-            )
-            signal.duplication_rule = duplication_rule
+    if signal_in.tags:
+        tags = []
+        for t in signal_in.tags:
+            tags.append(tag_service.get_or_create(db_session=db_session, tag_in=t))
+        signal.tags = tags
 
-    if signal_in.suppression_rule:
-        if signal_in.suppression_rule.id:
-            update_suppression_rule(
-                db_session=db_session, suppression_rule_in=signal_in.suppression_rule
+    if signal_in.entity_types:
+        entity_types = []
+        for e in signal_in.entity_types:
+            entity_type = entity_type_service.get(db_session=db_session, entity_type_id=e.id)
+            entity_types.append(entity_type)
+
+        signal.entity_types = entity_types
+
+    if signal_in.engagements:
+        engagements = []
+        for signal_engagement_in in signal_in.engagements:
+            signal_engagement = get_signal_engagement_by_name_or_raise(
+                db_session=db_session,
+                project_id=signal.project.id,
+                signal_engagement_in=signal_engagement_in,
             )
-        else:
-            suppression_rule = create_suppression_rule(
-                db_session=db_session, suppression_rule_in=signal_in.suppression_rule
+            engagements.append(signal_engagement)
+
+        signal.engagements = engagements
+
+    is_filters_updated = {filter.id for filter in signal.filters} != {
+        filter.id for filter in signal_in.filters
+    }
+
+    if is_filters_updated:
+        filters = []
+        for f in signal_in.filters:
+            signal_filter = get_signal_filter_by_name_or_raise(
+                db_session=db_session, project_id=signal.project.id, signal_filter_in=f
             )
-            signal.suppression_rule = suppression_rule
+            filters.append(signal_filter)
+
+        signal.filters = filters
+
+    if signal_in.workflows:
+        workflows = []
+        for w in signal_in.workflows:
+            workflow = workflow_service.get_by_name_or_raise(db_session=db_session, workflow_in=w)
+            workflows.append(workflow)
+
+        signal.workflows = workflows
+
+    if signal_in.oncall_service:
+        oncall_service = service_service.get(
+            db_session=db_session, service_id=signal_in.oncall_service.id
+        )
+        signal.oncall_service = oncall_service
 
     if signal_in.case_priority:
         case_priority = case_priority_service.get_by_name_or_default(
             db_session=db_session,
-            project_id=signal.case_type.project.id,
+            project_id=signal.project.id,
             case_priority_in=signal_in.case_priority,
         )
         signal.case_priority = case_priority
@@ -213,7 +536,7 @@ def update(*, db_session, signal: Signal, signal_in: SignalUpdate) -> Signal:
     return signal
 
 
-def delete(*, db_session, signal_id: int):
+def delete(*, db_session: Session, signal_id: int):
     """Deletes a signal definition."""
     signal = db_session.query(Signal).filter(Signal.id == signal_id).one()
     db_session.delete(signal)
@@ -221,108 +544,319 @@ def delete(*, db_session, signal_id: int):
     return signal_id
 
 
-def create_instance(*, db_session, signal_instance_in: SignalInstanceCreate) -> SignalInstance:
+def is_valid_uuid(value) -> bool:
+    """
+    Checks if the provided value is a valid UUID.
+
+    Args:
+        val: The value to be checked.
+
+    Returns:
+        bool: True if the value is a valid UUID, False otherwise.
+    """
+    try:
+        uuid.UUID(str(value), version=4)
+        return True
+    except ValueError:
+        return False
+
+
+def create_instance(
+    *, db_session: Session, signal_instance_in: SignalInstanceCreate
+) -> SignalInstance:
     """Creates a new signal instance."""
     project = project_service.get_by_name_or_raise(
         db_session=db_session, project_in=signal_instance_in.project
     )
 
+    signal = get(db_session=db_session, signal_id=signal_instance_in.signal.id)
+
     # we round trip the raw data to json-ify date strings
     signal_instance = SignalInstance(
-        **signal_instance_in.dict(exclude={"project", "tags", "raw"}),
-        raw=json.loads(signal_instance_in.raw.json()),
+        **signal_instance_in.dict(
+            exclude={
+                "case",
+                "case_priority",
+                "case_type",
+                "entities",
+                "external_id",
+                "project",
+                "raw",
+                "signal",
+            }
+        ),
+        raw=json.loads(json.dumps(signal_instance_in.raw)),
         project=project,
+        signal=signal,
     )
 
-    tags = []
-    for t in signal_instance_in.tags:
-        tags.append(tag_service.get_or_create(db_session=db_session, tag_in=t))
+    # if the signal has an existing uuid we propgate it as our primary key
+    if signal_instance_in.raw:
+        if signal_instance_in.raw.get("id"):
+            signal_instance.id = signal_instance_in.raw["id"]
 
-    signal_instance.tags = tags
+    if signal_instance.id and not is_valid_uuid(signal_instance.id):
+        msg = f"Invalid signal id format. Expecting UUIDv4 format. Signal id: {signal_instance.id}. Signal name/variant: {signal_instance.raw['name'] if signal_instance and signal_instance.raw and signal_instance.raw.get('name') else signal_instance.raw['variant']}"
+        log.warn(msg)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=[{"msg": msg}],
+        ) from None
+
+    if signal_instance_in.case_priority:
+        case_priority = case_priority_service.get_by_name_or_default(
+            db_session=db_session,
+            project_id=project.id,
+            case_priority_in=signal_instance_in.case_priority,
+        )
+        signal_instance.case_priority = case_priority
+
+    if signal_instance_in.case_type:
+        case_type = case_type_service.get_by_name_or_default(
+            db_session=db_session,
+            project_id=project.id,
+            case_type_in=signal_instance_in.case_type,
+        )
+        signal_instance.case_type = case_type
 
     db_session.add(signal_instance)
     db_session.commit()
     return signal_instance
 
 
-def create_instance_fingerprint(duplication_rule, signal_instance: SignalInstance) -> str:
-    """Given a list of tag_types and tags creates a hash of their values."""
-    fingerprint = hashlib.sha1(str(signal_instance.raw).encode("utf-8")).hexdigest()
+def update_instance(
+    *, db_session: Session, signal_instance_in: SignalInstanceCreate
+) -> SignalInstance:
+    """Updates an existing signal instance."""
+    if signal_instance_in.raw:
+        if signal_instance_in.raw.get("id"):
+            signal_instance_id = signal_instance_in.raw["id"]
 
-    # use tags if we have them
-    if duplication_rule:
-        if signal_instance.tags:
-            tag_type_names = [t.name for t in duplication_rule.tag_types]
-            hash_values = []
-            for tag in signal_instance.tags:
-                if tag.tag_type.name in tag_type_names:
-                    hash_values.append(tag.tag_type.name)
-            fingerprint = hashlib.sha1("-".join(sorted(hash_values)).encode("utf-8")).hexdigest()
+    signal_instance = get_signal_instance(
+        db_session=db_session, signal_instance_id=signal_instance_id
+    )
+    signal_instance.raw = json.loads(json.dumps(signal_instance_in.raw))
 
-    return fingerprint
-
-
-def deduplicate(
-    *, db_session, signal_instance: SignalInstance, duplication_rule: DuplicationRule
-) -> bool:
-    """Find any matching duplication rules and match signals."""
-    duplicate = False
-
-    # always fingerprint
-    fingerprint = create_instance_fingerprint(duplication_rule, signal_instance)
-    signal_instance.fingerprint = fingerprint
     db_session.commit()
+    return signal_instance
 
-    if not duplication_rule:
-        return duplicate
 
-    if duplication_rule.mode != RuleMode.active:
-        return duplicate
+def filter_snooze(*, db_session: Session, signal_instance: SignalInstance) -> SignalInstance:
+    """Filters a signal instance for snoozing.
 
-    window = datetime.now(timezone.utc) - timedelta(seconds=duplication_rule.window)
-    fingerprint = create_instance_fingerprint(duplication_rule.tag_types, signal_instance)
+    Args:
+        db_session (Session): Database session.
+        signal_instance (SignalInstance): Signal instance to be filtered.
 
-    instances = (
-        db_session.query(SignalInstance)
-        .filter(Signal.id == signal_instance.signal.id)
-        .filter(SignalInstance.id != signal_instance.id)
-        .filter(SignalInstance.created_at >= window)
-        .filter(SignalInstance.fingerprint == fingerprint)
+    Returns:
+        SignalInstance: The filtered signal instance.
+    """
+    for f in signal_instance.signal.filters:
+        if f.mode != SignalFilterMode.active:
+            continue
+
+        if f.action != SignalFilterAction.snooze:
+            continue
+
+        if f.expiration.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc):
+            continue
+
+        query = db_session.query(SignalInstance).filter(
+            SignalInstance.signal_id == signal_instance.signal_id
+        )
+        query = apply_filter_specific_joins(SignalInstance, f.expression, query)
+        query = apply_filters(query, f.expression)
+        # an expression is not required for snoozing, if absent we snooze regardless of entity
+        if f.expression:
+            instances = query.filter(SignalInstance.id == signal_instance.id).all()
+
+            if instances:
+                signal_instance.filter_action = SignalFilterAction.snooze
+                break
+        else:
+            signal_instance.filter_action = SignalFilterAction.snooze
+            break
+
+    return signal_instance
+
+
+def filter_dedup(*, db_session: Session, signal_instance: SignalInstance) -> SignalInstance:
+    """Filters a signal instance for deduplication.
+
+    Args:
+        db_session (Session): Database session.
+        signal_instance (SignalInstance): Signal instance to be filtered.
+
+    Returns:
+        SignalInstance: The filtered signal instance.
+    """
+    if not signal_instance.signal.filters:
+        default_dedup_window = datetime.now(timezone.utc) - timedelta(hours=1)
+        instance = (
+            db_session.query(SignalInstance)
+            .filter(
+                SignalInstance.signal_id == signal_instance.signal_id,
+                SignalInstance.created_at >= default_dedup_window,
+                SignalInstance.id != signal_instance.id,
+                SignalInstance.case_id.isnot(None),  # noqa
+            )
+            .with_entities(SignalInstance.case_id)
+            .order_by(desc(SignalInstance.created_at))
+            .first()
+        )
+
+        if instance:
+            signal_instance.case_id = instance.case_id
+            signal_instance.filter_action = SignalFilterAction.deduplicate
+        return signal_instance
+
+    for f in signal_instance.signal.filters:
+        if f.mode != SignalFilterMode.active:
+            continue
+
+        if f.action != SignalFilterAction.deduplicate:
+            continue
+
+        query = db_session.query(SignalInstance).filter(
+            SignalInstance.signal_id == signal_instance.signal_id
+        )
+        query = apply_filter_specific_joins(SignalInstance, f.expression, query)
+        query = apply_filters(query, f.expression)
+
+        window = datetime.now(timezone.utc) - timedelta(minutes=f.window)
+        query = query.filter(SignalInstance.created_at >= window)
+        query = query.join(SignalInstance.entities).filter(
+            Entity.id.in_([e.id for e in signal_instance.entities])
+        )
+        query = query.filter(SignalInstance.id != signal_instance.id)
+
+        # get the earliest instance
+        query = query.order_by(asc(SignalInstance.created_at))
+        instances = query.all()
+
+        if instances:
+            # associate with existing case
+            signal_instance.case_id = instances[0].case_id
+            signal_instance.filter_action = SignalFilterAction.deduplicate
+            break
+
+    return signal_instance
+
+
+def filter_signal(*, db_session: Session, signal_instance: SignalInstance) -> bool:
+    """
+    Apply filter actions to the signal instance.
+
+    The function first checks if the signal instance is snoozed. If not snoozed,
+    it checks for a deduplication rule set on the signal instance. If no
+    deduplication rule is set, a default deduplication rule is applied,
+    grouping all signal instances together for a 1-hour window, regardless of
+    the entities in the signal instance.
+
+    Args:
+        db_session (Session): Database session.
+        signal_instance (SignalInstance): Signal instance to be filtered.
+
+    Returns:
+        bool: True if the signal instance is filtered, False otherwise.
+    """
+    filtered = False
+
+    signal_instance = filter_snooze(db_session=db_session, signal_instance=signal_instance)
+
+    # we only dedupe if we haven't been snoozed
+    if not signal_instance.filter_action:
+        signal_instance = filter_dedup(db_session=db_session, signal_instance=signal_instance)
+
+    if not signal_instance.filter_action:
+        signal_instance.filter_action = SignalFilterAction.none
+    else:
+        filtered = True
+
+    db_session.commit()
+    return filtered
+
+
+def get_unprocessed_signal_instance_ids(session: Session) -> list[int]:
+    """Retrieves IDs of unprocessed signal instances from the database.
+
+    Args:
+        session (Session): The database session.
+
+    Returns:
+        list[int]: A list of signal instance IDs that need processing.
+    """
+    return (
+        session.query(SignalInstance.id)
+        .filter(SignalInstance.filter_action == None)  # noqa
+        .filter(SignalInstance.case_id == None)  # noqa
+        .order_by(SignalInstance.created_at.asc())
+        .limit(500)
         .all()
     )
 
-    if instances:
-        duplicate = True
-        # TODO find the earliest created instance
-        signal_instance.case_id = instances[0].case_id
-        signal_instance.duplication_rule_id = duplication_rule.id
 
-    db_session.commit()
-    return duplicate
+def get_instances_in_case(db_session: Session, case_id: int) -> Query:
+    """
+    Retrieves signal instances associated with a given case.
+
+    Args:
+        db_session (Session): The database session.
+        case_id (int): The ID of the case.
+
+    Returns:
+        Query: A SQLAlchemy query object for the signal instances associated with the case.
+    """
+    return (
+        db_session.query(SignalInstance, Signal)
+        .join(Signal)
+        .with_entities(SignalInstance.id, Signal)
+        .filter(SignalInstance.case_id == case_id)
+        .order_by(SignalInstance.created_at)
+    )
 
 
-def supress(
-    *, db_session, signal_instance: SignalInstance, suppression_rule: SuppressionRule
-) -> bool:
-    """Find any matching suppression rules and match instances."""
-    supressed = False
+def get_cases_for_signal(db_session: Session, signal_id: int, limit: int = 10) -> Query:
+    """
+    Retrieves cases associated with a given signal.
 
-    if not suppression_rule:
-        return supressed
+    Args:
+        db_session (Session): The database session.
+        signal_id (int): The ID of the signal.
+        limit (int, optional): The maximum number of cases to retrieve. Defaults to 10.
 
-    if suppression_rule.mode != RuleMode.active:
-        return supressed
+    Returns:
+        Query: A SQLAlchemy query object for the cases associated with the signal.
+    """
+    return (
+        db_session.query(Case)
+        .join(SignalInstance)
+        .filter(SignalInstance.signal_id == signal_id)
+        .order_by(desc(Case.created_at))
+        .limit(limit)
+    )
 
-    if suppression_rule.expiration:
-        if suppression_rule.expiration <= datetime.now():
-            return supressed
 
-    rule_tag_ids = sorted([t.id for t in suppression_rule.tags])
-    signal_tag_ids = sorted([t.id for t in signal_instance.tags])
+def get_cases_for_signal_by_resolution_reason(
+    db_session: Session, signal_id: int, resolution_reason: str, limit: int = 10
+) -> Query:
+    """
+    Retrieves cases associated with a given signal and resolution reason.
 
-    if rule_tag_ids == signal_tag_ids:
-        supressed = True
-        signal_instance.suppression_rule_id = suppression_rule.id
+    Args:
+        db_session (Session): The database session.
+        signal_id (int): The ID of the signal.
+        resolution_reason (str): The resolution reason to filter cases by.
+        limit (int, optional): The maximum number of cases to retrieve. Defaults to 10.
 
-    db_session.commit()
-    return supressed
+    Returns:
+        Query: A SQLAlchemy query object for the cases associated with the signal and resolution reason.
+    """
+    return (
+        db_session.query(Case)
+        .join(SignalInstance)
+        .filter(SignalInstance.signal_id == signal_id)
+        .filter(Case.resolution_reason == resolution_reason)
+        .order_by(desc(Case.created_at))
+        .limit(limit)
+    )

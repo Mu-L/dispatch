@@ -6,6 +6,7 @@
 .. moduleauthor:: Kevin Glisson <kglisson@netflix.com>
 .. moduleauthor:: Marc Vilanova <mvilanova@netflix.com>
 """
+
 import re
 import logging
 from typing import Any, List
@@ -90,6 +91,12 @@ def get_task_activity(
 
             task = {"resource_id": discussion_id}
 
+            # we assume the person doing the assignment to be the creator of the task
+            creator_person_id = a["actors"][0]["user"]["knownUser"]["personName"]
+            task["creator"] = {
+                "individual": {"email": get_user_email(people_client, creator_person_id)}
+            }
+
             # we create a new task when comment has an assignment added to it
             if subtype == AssignmentSubTypes.added:
                 # we need to fetch the comment data
@@ -100,12 +107,6 @@ def get_task_activity(
 
                 task["tickets"] = get_tickets(comment["replies"])
 
-                # we assume the person doing the assignment to be the creator of the task
-                creator_person_id = a["actors"][0]["user"]["knownUser"]["personName"]
-                task["creator"] = {
-                    "individual": {"email": get_user_email(people_client, creator_person_id)}
-                }
-
                 # we only associate the current assignee event if multiple of people are mentioned (NOTE: should we also associated other mentions?)
                 assignee_person_id = a["primaryActionDetail"]["comment"][CommentTypes.assignment][
                     "assignedUser"
@@ -114,7 +115,7 @@ def get_task_activity(
                     {"individual": {"email": get_user_email(people_client, assignee_person_id)}}
                 ]
 
-                # this is when the user was assigned (making it into a task, not when the inital comment was created)
+                # this is when the user was assigned (making it into a task, not when the initial comment was created)
                 task["created_at"] = a["timestamp"]
 
                 # this is the deep link to the associated comment

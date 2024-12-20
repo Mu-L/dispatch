@@ -4,10 +4,20 @@
     :copyright: (c) 2019 by Netflix Inc., see AUTHORS for more
     :license: Apache, see LICENSE for more details.
 """
+
 import logging
 from typing import Any, List, Optional
 
-from blockkit import Actions, Button, Context, Divider, MarkdownText, Section
+from blockkit import (
+    Actions,
+    Button,
+    Context,
+    Divider,
+    MarkdownText,
+    Section,
+    StaticSelect,
+    PlainOption,
+)
 from slack_sdk.web.client import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -20,6 +30,7 @@ from dispatch.messaging.strings import (
     render_message_template,
 )
 from dispatch.plugins.dispatch_slack.config import SlackConfiguration
+from dispatch.plugins.dispatch_slack.enums import SlackAPIErrorCode
 
 log = logging.getLogger(__name__)
 
@@ -95,10 +106,6 @@ def get_incident_conversation_command_message(
             "response_type": "ephemeral",
             "text": "Opening a dialog to engage an oncall person...",
         },
-        config.slack_command_list_resources: {
-            "response_type": "ephemeral",
-            "text": "Fetching the list of incident resources...",
-        },
         config.slack_command_report_incident: {
             "response_type": "ephemeral",
             "text": "Opening a dialog to report an incident...",
@@ -123,6 +130,14 @@ def get_incident_conversation_command_message(
             "response_type": "ephemeral",
             "text": "Fetching the list of workflows...",
         },
+        config.slack_command_create_task: {
+            "response_type": "ephemeral",
+            "text": "Opening a dialog to create a new incident task...",
+        },
+        config.slack_command_create_case: {
+            "response_type": "ephemeral",
+            "text": "Opening a dialog to create a new case...",
+        },
     }
 
     return command_messages.get(command_string, default)
@@ -140,7 +155,7 @@ def build_role_error_message(payload: dict) -> str:
 
 def build_context_error_message(payload: dict, error: Any) -> str:
     message = (
-        f"""I see you tried to run `{payload['command']}` in an non-incident conversation. Incident-specifc commands can only be run in incident conversations."""  # command_context_middleware()
+        f"""I see you tried to run `{payload['command']}` in an non-incident conversation. Incident-specific commands can only be run in incident conversations."""  # command_context_middleware()
         if payload.get("command")
         else str(error)  # everything else
     )
@@ -162,7 +177,7 @@ def build_bot_not_present_message(client: WebClient, command: str, conversations
 def build_slack_api_error_message(error: SlackApiError) -> str:
     return (
         "Sorry, the request to Slack timed out. Try running your command again."
-        if error.response.get("error") == "expired_trigger_id"
+        if error.response.get("error") == SlackAPIErrorCode.VIEW_EXPIRED
         else "Sorry, we've run into an unexpected error with Slack."
     )
 
@@ -222,6 +237,28 @@ def default_notification(items: list):
 
                     elements.append(element)
             blocks.append(Actions(elements=elements))
+
+        if select := item.get("select"):
+            options = []
+            for option in select["options"]:
+                element = PlainOption(text=option["option_text"], value=option["option_value"])
+                options.append(element)
+
+            static_select = []
+            if select.get("placeholder"):
+                static_select.append(
+                    StaticSelect(
+                        placeholder=select["placeholder"],
+                        options=options,
+                        action_id=select["select_action"],
+                    )
+                )
+            else:
+                static_select.append(
+                    StaticSelect(options=options, action_id=select["select_action"])
+                )
+            blocks.append(Actions(elements=static_select))
+
     return blocks
 
 
@@ -239,7 +276,6 @@ def create_message_blocks(
         items.append(kwargs)  # combine items and kwargs
 
     template_func, description = get_template(message_type)
-
     blocks = []
     if description:  # include optional description text (based on message type)
         blocks.append(Section(text=description))

@@ -7,26 +7,26 @@
 .. moduleauthor:: Kevin Glisson <kglisson@netflix.com>
 .. moduleauthor:: Marc Vilanova <mvilanova@netflix.com>
 """
-import threading
+
 import logging
 import time
+
+from multiprocessing.pool import ThreadPool
 
 import schedule
 
 log = logging.getLogger(__name__)
 
 
-def run_threaded(job_func):
-    """Runs a given job in a thread."""
-    job_thread = threading.Thread(target=job_func)
-    job_thread.start()
-
-
 #  See: https://schedule.readthedocs.io/en/stable/ for documentation on job syntax
-class Scheduler(object):
+class Scheduler:
     """Simple scheduler class that holds all scheduled functions."""
 
     registered_tasks = []
+    running = True
+
+    def __init__(self, num_workers=100):
+        self.pool = ThreadPool(processes=num_workers)
 
     def add(self, job, *args, **kwargs):
         """Adds a task to the scheduler."""
@@ -38,7 +38,7 @@ class Scheduler(object):
                 name = kwargs.pop("name")
 
             self.registered_tasks.append(
-                {"name": name, "func": func, "job": job.do(run_threaded, func)}
+                {"name": name, "func": func, "job": job.do(self.pool.apply_async, func)}
             )
 
         return decorator
@@ -49,9 +49,21 @@ class Scheduler(object):
 
     def start(self):
         """Runs all scheduled tasks."""
-        while True:
+        log.info("Starting scheduler...")
+
+        while self.running:
             schedule.run_pending()
             time.sleep(1)
 
+    def stop(self):
+        """Stops the scheduler (letting existing threads finish)."""
+        log.debug("Stopping scheduler...")
+        self.pool.close()
+        self.running = False
+
 
 scheduler = Scheduler()
+
+
+def stop_scheduler(signum, frame):
+    scheduler.stop()

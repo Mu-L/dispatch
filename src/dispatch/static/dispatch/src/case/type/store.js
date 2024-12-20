@@ -6,7 +6,10 @@ import SearchUtils from "@/search/utils"
 
 const getDefaultSelectedState = () => {
   return {
+    auto_close: null,
     case_template_document: null,
+    conversation_target: null,
+    cost_model: null,
     default: false,
     description: null,
     enabled: false,
@@ -19,7 +22,6 @@ const getDefaultSelectedState = () => {
     plugin_metadata: [],
     project: null,
     slug: null,
-    conversation_target: null,
     visibility: null,
   }
 }
@@ -40,7 +42,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["name"],
       descending: [false],
       filters: {

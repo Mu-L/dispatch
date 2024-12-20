@@ -1,34 +1,33 @@
 <template>
   <v-dialog v-model="display" max-width="600px">
-    <template v-slot:activator="{ on }">
-      <v-badge :value="numFilters" bordered overlap color="info" :content="numFilters">
-        <v-btn color="secondary" v-on="on"> Filter </v-btn>
+    <template #activator="{ props }">
+      <v-badge :model-value="!!numFilters" bordered color="info" :content="numFilters">
+        <v-btn color="secondary" v-bind="props"> Filter </v-btn>
       </v-badge>
     </template>
     <v-card>
       <v-card-title>
-        <span class="headline">Data Query Filters</span>
+        <span class="text-h5">Data Query Filters</span>
       </v-card-title>
-      <v-list dense>
+      <v-list density="compact">
         <v-list-item>
-          <v-list-item-content>
-            <project-combobox v-model="local_project" label="Projects" />
-          </v-list-item-content>
+          <project-combobox v-model="local_project" label="Projects" />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <tag-type-filter-combobox v-model="local_tag_type" label="Tag Types" />
-          </v-list-item-content>
+          <tag-type-filter-combobox v-model="local_tag_type" label="Tag Types" />
         </v-list-item>
         <v-list-item>
-          <v-list-item-content>
-            <tag-filter-auto-complete v-model="local_tag" label="Tags" />
-          </v-list-item-content>
+          <tag-filter-auto-complete
+            v-model="local_tag"
+            label="Tags"
+            model="query"
+            :project="local_project"
+          />
         </v-list-item>
       </v-list>
       <v-card-actions>
         <v-spacer />
-        <v-btn color="info" text @click="applyFilters()"> Apply Filters </v-btn>
+        <v-btn color="info" variant="text" @click="applyFilters()"> Apply Filters </v-btn>
       </v-card-actions>
     </v-card>
   </v-dialog>
@@ -39,7 +38,7 @@ import { sum } from "lodash"
 import { mapFields } from "vuex-map-fields"
 
 import ProjectCombobox from "@/project/ProjectCombobox.vue"
-import TagFilterAutoComplete from "@/tag/TagFilterAutoComplete.vue"
+import TagFilterAutoComplete from "@/tag/TagPicker.vue"
 import TagTypeFilterCombobox from "@/tag_type/TagTypeFilterCombobox.vue"
 
 export default {

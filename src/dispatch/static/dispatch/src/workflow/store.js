@@ -11,7 +11,7 @@ const getDefaultSelectedState = () => {
     resource_id: null,
     parameters: [],
     project: null,
-    plugin_instance: { title: null, slug: null },
+    plugin_instance: null,
     name: null,
     id: null,
     loading: false,
@@ -50,7 +50,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       descending: [false],
       filters: {
         project: [],
@@ -92,6 +92,8 @@ const actions = {
       commit("SET_SELECTED_INSTANCE_INCIDENT", payload.data)
     } else if (payload.type === "case") {
       commit("SET_SELECTED_INSTANCE_CASE", payload.data)
+    } else if (payload.type === "signal") {
+      commit("SET_SELECTED_INSTANCE_SIGNAL", payload.data)
     }
   },
   removeShow({ commit }, workflow) {
@@ -99,6 +101,10 @@ const actions = {
     commit("SET_SELECTED", workflow)
   },
   closeCreateEdit({ commit }) {
+    commit("SET_DIALOG_CREATE_EDIT", false)
+    commit("RESET_SELECTED")
+  },
+  closeCreateEditDialog({ commit }) {
     commit("SET_DIALOG_CREATE_EDIT", false)
     commit("RESET_SELECTED")
   },
@@ -218,6 +224,9 @@ const mutations = {
   },
   SET_SELECTED_INSTANCE_INCIDENT(state, value) {
     state.selectedInstance.incident = value
+  },
+  SET_SELECTED_INSTANCE_SIGNAL(state, value) {
+    state.selectedInstance.signal = value
   },
   RESET_SELECTED_INSTANCE(state) {
     // do not reset project

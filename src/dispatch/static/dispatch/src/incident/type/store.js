@@ -21,6 +21,7 @@ const getDefaultSelectedState = () => {
     enabled: false,
     default: false,
     project: null,
+    cost_model: null,
   }
 }
 
@@ -40,7 +41,7 @@ const state = {
     options: {
       q: "",
       page: 1,
-      itemsPerPage: 10,
+      itemsPerPage: 25,
       sortBy: ["name"],
       descending: [false],
       filters: {
